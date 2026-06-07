@@ -13,7 +13,7 @@ var typedMessageSidecars sync.Map
 
 var typedMessageSidecarBytesType = reflect.TypeOf([]byte(nil))
 
-// ToTypedMessage converts a proto Message into TypedMessage.
+//converts a proto Message into TypedMessage.
 func ToTypedMessage(message proto.Message) *TypedMessage {
 	if message == nil {
 		return nil
@@ -24,21 +24,6 @@ func ToTypedMessage(message proto.Message) *TypedMessage {
 		Value: settings,
 	}
 	// Preserve non-proto censhaper sidecars across TypedMessage round-trips.
-	// StreamConfig currently carries censhaperSettingsJSON outside the generated
-	// proto schema, but Xray still serializes many containing configs through
-	// ToTypedMessage/GetInstance during startup. Without this registry the field
-	// vanishes and censhaper silently disables itself at runtime.
-	// The registry is keyed by the TypedMessage instance itself rather than
-	// by marshaled protobuf bytes. Two StreamConfig values can be proto-identical
-	// yet carry different censhaper sidecars, and a byte-based key would make the
-	// later one overwrite the earlier one.
-	// Only store when at least one sidecar carries actual data.
-	// collectTypedMessageSidecars appends nil placeholders for every
-	// censhaperSettingsJSON field it encounters, even when the field is empty.
-	// Without this guard, ToTypedMessage would insert a map entry for every
-	// StreamConfig-bearing message, causing the sync.Map to grow with dead
-	// entries on each config reload (map keys are pointer-valued and never
-	// explicitly deleted).
 	if sidecars := collectTypedMessageSidecars(reflect.ValueOf(message), nil); len(sidecars) > 0 {
 		for _, s := range sidecars {
 			if s != nil {

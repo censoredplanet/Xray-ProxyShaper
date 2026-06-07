@@ -26,14 +26,7 @@ type MemoryStreamConfig struct {
 	DownloadSettings *MemoryStreamConfig
 }
 
-// [NEW] Close now walks nested DownloadSettings as well as the top-level
-// censhaper manager. Split HTTP and similar transports can allocate secondary
-// MemoryStreamConfig trees, so only closing the top-level config leaked the
-// compiled WASM runtimes hanging off child configs.
-//
-// [NEW] We also nil the fields before closing them so repeated Close calls are
-// harmless. Xray has more than one ownership path for stream settings, and
-// making teardown idempotent is safer than assuming a single caller.
+//  releases nested stream settings and censhaper state.
 func (m *MemoryStreamConfig) Close() error {
 	if m == nil {
 		return nil

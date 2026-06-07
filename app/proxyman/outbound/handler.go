@@ -378,7 +378,6 @@ func (h *Handler) Start() error {
 	return nil
 }
 
-// Close implements common.Closable.
 func (h *Handler) Close() error {
 	var errs []error
 	if err := common.Close(h.mux); err != nil {
@@ -387,9 +386,6 @@ func (h *Handler) Close() error {
 	if err := common.Close(h.proxy); err != nil {
 		errs = append(errs, err)
 	}
-	// Outbound handlers own the MemoryStreamConfig they built at startup.
-	// Return teardown failures here so censhaper runtime cleanup problems do not
-	// disappear behind a nil Close result.
 	if h.streamSettings != nil {
 		if err := h.streamSettings.Close(); err != nil {
 			errs = append(errs, err)

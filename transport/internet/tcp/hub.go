@@ -17,7 +17,7 @@ import (
 	"github.com/xtls/xray-core/transport/internet/tls"
 )
 
-// Listener is an internet.Listener that listens for TCP connections.
+//Listens for TCP connections.
 type Listener struct {
 	listener      net.Listener
 	tlsConfig     *gotls.Config
@@ -25,9 +25,6 @@ type Listener struct {
 	authConfig    internet.ConnectionAuthenticator
 	config        *Config
 	addConn       internet.ConnHandler
-	// [NEW] The listener owns the censhaper manager lifecycle for inbound TCP.
-	// Keeping Close on the interface lets shutdown return teardown failures
-	// instead of silently discarding them.
 	censhaperManager interface {
 		WrapServer(ctx context.Context, conn net.Conn) (net.Conn, error)
 		Close(ctx context.Context) error
@@ -89,9 +86,6 @@ func ListenTCP(ctx context.Context, address net.Address, port net.Port, streamSe
 		}
 	}
 	if config := reality.ConfigFromStreamSettings(streamSettings); config != nil {
-		// [NEW] REALITY server config is built outside the stdlib TLS helpers, so
-		// censhaper has to disable dynamic record sizing on the REALITY config
-		// directly to preserve one shaped slot per encrypted record.
 		if streamSettings.censhaperManager != nil {
 			l.realityConfig = config.GetREALITYConfigForcenshaper()
 		} else {
@@ -144,7 +138,6 @@ func (v *Listener) keepAccepting() {
 					return
 				}
 			}
-			// censhaper wraps AFTER TLS so each scheduled Write produces one TLS record.
 			if v.censhaperManager != nil {
 				conn, err = v.censhaperManager.WrapServer(context.Background(), conn)
 				if err != nil {
@@ -171,8 +164,6 @@ func (v *Listener) Close() error {
 	if err := v.listener.Close(); err != nil {
 		errs = append(errs, err)
 	}
-	// [NEW] Surface censhaper teardown failures instead of dropping them. That
-	// makes leaked WASM runtime shutdown visible in logs and tests.
 	if v.censhaperManager != nil {
 		if err := v.censhaperManager.Close(context.Background()); err != nil {
 			errs = append(errs, err)
