@@ -1,28 +1,28 @@
-# Xray-CenShaper
+# Xray-ProxyShaper
 
-Integration of CenShaper into [Xray-core](https://github.com/XTLS/Xray-core), adding censorship-resistant traffic obfuscation capabilities to VLESS and VMess over TLS/uTLS.
+Integration of ProxyShaper into [Xray-core](https://github.com/XTLS/Xray-core), adding censorship-resistant traffic obfuscation capabilities to VLESS and VMess over TLS/uTLS.
 
 ## Overview
 
-**Xray-CenShaper** extends Xray-core with CenShaper's bootstrap traffic shaping mode. For TCP + TLS/uTLS connections, CenShaper sits **after** the TLS handshake and **before** the proxy protocol handshake, shaping the first encrypted TLS application-data records to evade traffic analysis.
+**Xray-ProxyShaper** extends Xray-core with ProxyShaper's bootstrap traffic shaping mode. For TCP + TLS/uTLS connections, ProxyShaper sits **after** the TLS handshake and **before** the proxy protocol handshake, shaping the first encrypted TLS application-data records to evade traffic analysis.
 
 ### Supported Protocols
 - **Proxy Protocols**: VLESS, VMess
 - **Transport**: TCP with TLS or uTLS
-- **CenShaper Mode**: Bootstrap (TLS-derived)
+- **ProxyShaper Mode**: Bootstrap (TLS-derived)
 
 ## How It Works
 
 ### Bootstrap Workflow
 
 1. **TLS Handshake** — Xray completes the outer TLS/uTLS handshake
-2. **Derive Seed** — Both client and server independently derive a 64-bit seed from TLS exporter keying material using `ExportKeyingMaterial("censhaper-v1", nil, 8)`
+2. **Derive Seed** — Both client and server independently derive a 64-bit seed from TLS exporter keying material using `ExportKeyingMaterial("proxyshaper-v1", nil, 8)`
 3. **Select Row** — Bootstrap selects one valid 10-slot traffic pattern:
    - Generate 5 candidate rows from an external generator
    - Keep the first row that fits the negotiated TLS overhead
    - Retry with incremented seed if no row is valid
 4. **Slot 0 Exchange** — The initiating side sends a slot 0 record containing:
-   - 4-byte magic marker `CShp`
+   - 4-byte magic marker `PShp`
    - Optional proxy payload in remaining capacity
 5. **Slot Execution** — Both peers execute slots 1-9 according to the derived schedule
 6. **Return to Passthrough** — After slot 9, the connection returns to normal operation and proxy protocol proceeds
@@ -64,7 +64,7 @@ Configured slot sizes represent **final encrypted TLS record size on the wire**,
 
 **Slot 0 (with bootstrap marker):**
 ```
-[4-byte magic: "CShp"][2-byte len][payload][random padding]
+[4-byte magic: "PShp"][2-byte len][payload][random padding]
 ```
 
 **Slots 1-9 (derived):**
@@ -79,7 +79,7 @@ Configured slot sizes represent **final encrypted TLS record size on the wire**,
   "streamSettings": {
     "network": "tcp",
     "security": "tls",
-    "censhaperSettings": {
+    "proxyshaperSettings": {
       "mode": "bootstrap",
       "disableTiming": true,
       "generatedFlow": {
@@ -98,11 +98,11 @@ Configured slot sizes represent **final encrypted TLS record size on the wire**,
 
 ### Code Organization
 
-- [`transport/internet/censhaper/`](transport/internet/censhaper/) — CenShaper integration into Xray transport layer
-- [`transport/internet/tcp/dialer.go`](transport/internet/tcp/dialer.go) — Client-side CenShaper wrapping
-- [`transport/internet/tcp/hub.go`](transport/internet/tcp/hub.go) — Server-side CenShaper wrapping
+- [`transport/internet/proxyshaper/`](transport/internet/proxyshaper/) — ProxyShaper integration into Xray transport layer
+- [`transport/internet/tcp/dialer.go`](transport/internet/tcp/dialer.go) — Client-side ProxyShaper wrapping
+- [`transport/internet/tcp/hub.go`](transport/internet/tcp/hub.go) — Server-side ProxyShaper wrapping
 - [`transport/internet/tls/`](transport/internet/tls/) — TLS configuration and uTLS normalization
-- [`censhaper/`](censhaper/) — External CenShaper host package (via `go.mod` replace)
+- [`proxyshaper/`](proxyshaper/) — External ProxyShaper host package (via `go.mod` replace)
 
 ## Compilation
 

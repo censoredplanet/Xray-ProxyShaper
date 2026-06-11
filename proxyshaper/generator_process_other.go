@@ -1,6 +1,6 @@
 //go:build !linux
 
-package host
+package proxyshaper
 
 import "os/exec"
 

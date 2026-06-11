@@ -17,15 +17,15 @@ import (
 	"github.com/xtls/xray-core/transport/internet/tls"
 )
 
-//Listens for TCP connections.
+// Listens for TCP connections.
 type Listener struct {
-	listener      net.Listener
-	tlsConfig     *gotls.Config
-	realityConfig *goreality.Config
-	authConfig    internet.ConnectionAuthenticator
-	config        *Config
-	addConn       internet.ConnHandler
-	censhaperManager interface {
+	listener           net.Listener
+	tlsConfig          *gotls.Config
+	realityConfig      *goreality.Config
+	authConfig         internet.ConnectionAuthenticator
+	config             *Config
+	addConn            internet.ConnHandler
+	proxyshaperManager interface {
 		WrapServer(ctx context.Context, conn net.Conn) (net.Conn, error)
 		Close(ctx context.Context) error
 	}
@@ -81,16 +81,12 @@ func ListenTCP(ctx context.Context, address net.Address, port net.Port, streamSe
 
 	if config := tls.ConfigFromStreamSettings(streamSettings); config != nil {
 		l.tlsConfig = config.GetTLSConfig()
-		if streamSettings.censhaperManager != nil {
+		if streamSettings.ProxyshaperManager != nil {
 			l.tlsConfig.DynamicRecordSizingDisabled = true
 		}
 	}
 	if config := reality.ConfigFromStreamSettings(streamSettings); config != nil {
-		if streamSettings.censhaperManager != nil {
-			l.realityConfig = config.GetREALITYConfigForcenshaper()
-		} else {
-			l.realityConfig = config.GetREALITYConfig()
-		}
+		l.realityConfig = config.GetREALITYConfig()
 		go goreality.DetectPostHandshakeRecordsLens(l.realityConfig)
 	}
 
@@ -106,8 +102,8 @@ func ListenTCP(ctx context.Context, address net.Address, port net.Port, streamSe
 		l.authConfig = auth
 	}
 
-	if streamSettings.censhaperManager != nil {
-		l.censhaperManager = streamSettings.censhaperManager
+	if streamSettings.ProxyshaperManager != nil {
+		l.proxyshaperManager = streamSettings.ProxyshaperManager
 	}
 
 	go l.keepAccepting()
@@ -138,10 +134,10 @@ func (v *Listener) keepAccepting() {
 					return
 				}
 			}
-			if v.censhaperManager != nil {
-				conn, err = v.censhaperManager.WrapServer(context.Background(), conn)
+			if v.proxyshaperManager != nil {
+				conn, err = v.proxyshaperManager.WrapServer(context.Background(), conn)
 				if err != nil {
-					errors.LogWarningInner(context.Background(), err, "censhaper server wrap failed")
+					errors.LogWarningInner(context.Background(), err, "proxyshaper server wrap failed")
 					return
 				}
 			}
@@ -164,8 +160,8 @@ func (v *Listener) Close() error {
 	if err := v.listener.Close(); err != nil {
 		errs = append(errs, err)
 	}
-	if v.censhaperManager != nil {
-		if err := v.censhaperManager.Close(context.Background()); err != nil {
+	if v.proxyshaperManager != nil {
+		if err := v.proxyshaperManager.Close(context.Background()); err != nil {
 			errs = append(errs, err)
 		}
 	}

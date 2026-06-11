@@ -43,9 +43,9 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			tlsConfig = config.GetTLSConfig(tls.WithDestination(dest))
 		}
 
-		// censhaper requires one TLS record per Write. Go's dynamic record
+		// proxyshaper requires one TLS record per Write. Go's dynamic record
 		// sizing starts at ~1KB and grows, which fragments large writes.
-		if streamSettings.censhaperManager != nil {
+		if streamSettings.ProxyshaperManager != nil {
 			tlsConfig.DynamicRecordSizingDisabled = true
 		}
 
@@ -102,20 +102,15 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			return nil, errors.New("MITM freedom RAW TLS: unexpected Negotiated Protocol (" + negotiatedProtocol + ") with " + mitmServerName).AtWarning()
 		}
 	} else if config := reality.ConfigFromStreamSettings(streamSettings); config != nil {
-		if streamSettings.censhaperManager != nil {
-			conn, err = reality.UClientForcenshaper(conn, config, ctx, dest)
-		} else {
-			conn, err = reality.UClient(conn, config, ctx, dest)
-		}
-		if err != nil {
+		if conn, err = reality.UClient(conn, config, ctx, dest); err != nil {
 			return nil, err
 		}
 	}
 
-	if streamSettings.censhaperManager != nil {
-		conn, err = streamSettings.censhaperManager.WrapClient(ctx, conn)
+	if streamSettings.ProxyshaperManager != nil {
+		conn, err = streamSettings.ProxyshaperManager.WrapClient(ctx, conn)
 		if err != nil {
-			return nil, errors.New("censhaper client wrap failed").Base(err)
+			return nil, errors.New("proxyshaper client wrap failed").Base(err)
 		}
 	}
 

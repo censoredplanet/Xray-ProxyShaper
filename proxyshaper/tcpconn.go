@@ -7,7 +7,7 @@
 // during the schedule window are pushed immediately rather than
 // buffered for up to 200ms.
 
-package host
+package proxyshaper
 
 import (
 	"fmt"

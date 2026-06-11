@@ -1725,15 +1725,15 @@ type FinalMask struct {
 	QuicParams *QuicParamsConfig `json:"quicParams"`
 }
 
-// censhaperSlot exists for legacy config validation.
-type censhaperSlot struct {
+// proxyshaperSlot exists for legacy config validation.
+type proxyshaperSlot struct {
 	Size     uint32 `json:"size"`
 	Dir      string `json:"dir"`
 	OffsetMs uint64 `json:"offset_ms"`
 }
 
-// censhaperGeneratedFlowConfig describes generator-backed bootstrap flows.
-type censhaperGeneratedFlowConfig struct {
+// proxyshaperGeneratedFlowConfig describes generator-backed bootstrap flows.
+type proxyshaperGeneratedFlowConfig struct {
 	GeneratorPath      string `json:"generatorPath,omitempty"`
 	TrafficProfilePath string `json:"trafficProfilePath,omitempty"`
 	ModelPath          string `json:"modelPath,omitempty"`
@@ -1741,62 +1741,62 @@ type censhaperGeneratedFlowConfig struct {
 	FlowLength         uint32 `json:"flowLength,omitempty"`
 }
 
-type censhaperConfig struct {
-	Mode          string                    `json:"mode"`
-	Slots         []censhaperSlot          `json:"slots,omitempty"`
-	Seed          *uint64                   `json:"seed,omitempty"`
-	DisableTiming bool                      `json:"disableTiming,omitempty"`
-	GeneratedFlow *censhaperGeneratedFlowConfig `json:"generatedFlow,omitempty"`
+type proxyshaperConfig struct {
+	Mode          string                          `json:"mode"`
+	Slots         []proxyshaperSlot               `json:"slots,omitempty"`
+	Seed          *uint64                         `json:"seed,omitempty"`
+	DisableTiming bool                            `json:"disableTiming,omitempty"`
+	GeneratedFlow *proxyshaperGeneratedFlowConfig `json:"generatedFlow,omitempty"`
 }
 
 const (
-	censhaperBootstrapSlotCount = 10
+	proxyshaperBootstrapSlotCount = 10
 )
 
-// Validate rejects unsupported censhaper configurations early.
-func (c *censhaperConfig) Validate(network, security string) error {
+// Validate rejects unsupported proxyshaper configurations early.
+func (c *proxyshaperConfig) Validate(network, security string) error {
 	if c == nil {
 		return nil
 	}
 	if strings.ToLower(network) != "tcp" {
-		return errors.New(`censhaper currently supports only "tcp" transport`)
+		return errors.New(`proxyshaper currently supports only "tcp" transport`)
 	}
 	switch strings.ToLower(security) {
 	case "tls":
 	default:
-		return errors.New(`censhaper currently requires "tls" security`)
+		return errors.New(`proxyshaper currently requires "tls" security`)
 	}
 	switch strings.ToLower(c.Mode) {
 	case "", "bootstrap":
 	default:
-		return errors.New(`censhaper "mode" must be "bootstrap"`)
+		return errors.New(`proxyshaper "mode" must be "bootstrap"`)
 	}
 	if len(c.Slots) > 0 {
-		return errors.New(`censhaper bootstrap mode must not set top-level "slots"; use "generatedFlow"`)
+		return errors.New(`proxyshaper bootstrap mode must not set top-level "slots"; use "generatedFlow"`)
 	}
 	if c.Seed != nil {
-		return errors.New(`censhaper bootstrap mode must not set "seed"; the row selector is derived from negotiated TLS session secrets`)
+		return errors.New(`proxyshaper bootstrap mode must not set "seed"; the row selector is derived from negotiated TLS session secrets`)
 	}
 	if c.GeneratedFlow == nil {
-		return errors.New(`censhaper bootstrap mode requires "generatedFlow"`)
+		return errors.New(`proxyshaper bootstrap mode requires "generatedFlow"`)
 	}
 	if !c.DisableTiming {
-		return errors.New(`censhaper bootstrap mode requires "disableTiming": true when "generatedFlow" is set`)
+		return errors.New(`proxyshaper bootstrap mode requires "disableTiming": true when "generatedFlow" is set`)
 	}
 	if c.GeneratedFlow.GeneratorPath == "" {
-		return errors.New(`censhaper generatedFlow requires "generatorPath"`)
+		return errors.New(`proxyshaper generatedFlow requires "generatorPath"`)
 	}
 	if c.GeneratedFlow.TrafficProfilePath == "" {
-		return errors.New(`censhaper generatedFlow requires "trafficProfilePath"`)
+		return errors.New(`proxyshaper generatedFlow requires "trafficProfilePath"`)
 	}
 	if c.GeneratedFlow.ModelPath == "" {
-		return errors.New(`censhaper generatedFlow requires "modelPath"`)
+		return errors.New(`proxyshaper generatedFlow requires "modelPath"`)
 	}
 	if c.GeneratedFlow.NumFlows != 5 {
-		return errors.New(`censhaper generatedFlow "numFlows" must be 5`)
+		return errors.New(`proxyshaper generatedFlow "numFlows" must be 5`)
 	}
-	if c.GeneratedFlow.FlowLength != censhaperBootstrapSlotCount {
-		return errors.New(`censhaper generatedFlow "flowLength" must be 10`)
+	if c.GeneratedFlow.FlowLength != proxyshaperBootstrapSlotCount {
+		return errors.New(`proxyshaper generatedFlow "flowLength" must be 10`)
 	}
 	return nil
 }
@@ -1818,7 +1818,7 @@ type StreamConfig struct {
 	WSSettings          *WebSocketConfig   `json:"wsSettings"`
 	HTTPUPGRADESettings *HttpUpgradeConfig `json:"httpupgradeSettings"`
 	HysteriaSettings    *HysteriaConfig    `json:"hysteriaSettings"`
-	censhaperSettings   *censhaperConfig   `json:"censhaperSettings"`
+	ProxyshaperSettings *proxyshaperConfig `json:"proxyshaperSettings"`
 	SocketSettings      *SocketConfig      `json:"sockopt"`
 }
 
@@ -2074,18 +2074,18 @@ func (c *StreamConfig) Build() (*internet.StreamConfig, error) {
 		}
 	}
 
-	if c.censhaperSettings != nil {
+	if c.ProxyshaperSettings != nil {
 		// Validate in Go before serializing the sideband config. This keeps
 		// bad schedules and unsupported transport/security combinations from
 		// reaching runtime, where failures are much harder to diagnose.
-		if err := c.censhaperSettings.Validate(config.ProtocolName, c.Security); err != nil {
-			return nil, errors.New("invalid censhaper settings").Base(err)
+		if err := c.ProxyshaperSettings.Validate(config.ProtocolName, c.Security); err != nil {
+			return nil, errors.New("invalid proxyshaper settings").Base(err)
 		}
-		obfJSON, err := json.Marshal(c.censhaperSettings)
+		obfJSON, err := json.Marshal(c.ProxyshaperSettings)
 		if err != nil {
-			return nil, errors.New("failed to marshal censhaper settings").Base(err)
+			return nil, errors.New("failed to marshal proxyshaper settings").Base(err)
 		}
-		config.censhaperSettingsJSON = obfJSON
+		config.ProxyshaperSettingsJSON = obfJSON
 	}
 
 	return config, nil

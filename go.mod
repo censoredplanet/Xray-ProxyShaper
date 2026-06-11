@@ -3,7 +3,7 @@ module github.com/xtls/xray-core
 go 1.26
 
 require (
-	censhaper v0.0.0-00010101000000-000000000000
+	proxyshaper v0.0.0-00010101000000-000000000000
 	github.com/apernet/quic-go v0.59.1-0.20260330051153-c402ee641eb6
 	github.com/cloudflare/circl v1.6.3
 	github.com/ghodss/yaml v1.0.1-0.20220118164431-d8423dcdf344
@@ -55,6 +55,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace censhaper => ./censhaper
+replace proxyshaper => ./proxyshaper
 
 replace github.com/tetratelabs/wazero => github.com/refraction-networking/wazero v1.7.3-w

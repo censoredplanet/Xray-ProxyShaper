@@ -1,5 +1,5 @@
-// Package censhaper integrates the host censhaper filter into Xray transport.
-package censhaper
+// Package proxyshaper integrates the host proxyshaper filter into Xray transport.
+package proxyshaper
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"net"
 	"sync"
 
-	censhaper "censhaper"
+	hostproxyshaper "proxyshaper"
 )
 
 // GeneratedFlowConfig configures generator-backed bootstrap flows.
@@ -20,11 +20,11 @@ type GeneratedFlowConfig struct {
 }
 
 type Config struct {
-	Mode          string             `json:"mode"`
-	Slots         []censhaper.Slot   `json:"slots,omitempty"`
-	Seed          *uint64            `json:"seed,omitempty"`
-	DisableTiming bool               `json:"disableTiming,omitempty"`
-	GeneratedFlow *GeneratedFlowConfig `json:"generatedFlow,omitempty"`
+	Mode          string                 `json:"mode"`
+	Slots         []hostproxyshaper.Slot `json:"slots,omitempty"`
+	Seed          *uint64                `json:"seed,omitempty"`
+	DisableTiming bool                   `json:"disableTiming,omitempty"`
+	GeneratedFlow *GeneratedFlowConfig   `json:"generatedFlow,omitempty"`
 }
 
 // Manager holds the bootstrap filter for both roles and creates per-connection
@@ -32,8 +32,8 @@ type Config struct {
 // Thread-safe.
 type Manager struct {
 	mu           sync.Mutex
-	clientFilter *censhaper.Filter
-	serverFilter *censhaper.Filter
+	clientFilter *hostproxyshaper.Filter
+	serverFilter *hostproxyshaper.Filter
 }
 
 // NewManager creates a Manager from config.
@@ -43,16 +43,16 @@ func NewManager(ctx context.Context, cfg *Config) (*Manager, error) {
 		mode = "bootstrap"
 	}
 	if mode != "bootstrap" {
-		return nil, fmt.Errorf("censhaper: unsupported mode %q; only bootstrap is implemented", mode)
+		return nil, fmt.Errorf("proxyshaper: unsupported mode %q; only bootstrap is implemented", mode)
 	}
 
 	if cfg.Seed != nil {
-		return nil, fmt.Errorf("censhaper: bootstrap mode no longer accepts \"seed\"; the row selector is derived from negotiated TLS session secrets")
+		return nil, fmt.Errorf("proxyshaper: bootstrap mode no longer accepts \"seed\"; the row selector is derived from negotiated TLS session secrets")
 	}
 
-	var generatedFlow *censhaper.GeneratedFlowConfig
+	var generatedFlow *hostproxyshaper.GeneratedFlowConfig
 	if cfg.GeneratedFlow != nil {
-		generatedFlow = &censhaper.GeneratedFlowConfig{
+		generatedFlow = &hostproxyshaper.GeneratedFlowConfig{
 			GeneratorPath:      cfg.GeneratedFlow.GeneratorPath,
 			TrafficProfilePath: cfg.GeneratedFlow.TrafficProfilePath,
 			ModelPath:          cfg.GeneratedFlow.ModelPath,
@@ -61,27 +61,27 @@ func NewManager(ctx context.Context, cfg *Config) (*Manager, error) {
 		}
 	}
 
-	clientCfg := censhaper.Config{
+	clientCfg := hostproxyshaper.Config{
 		Role:          "client",
 		Mode:          mode,
 		DisableTiming: cfg.DisableTiming,
 		GeneratedFlow: generatedFlow,
 	}
-	clientFilter, err := censhaper.NewFilter(ctx, clientCfg)
+	clientFilter, err := hostproxyshaper.NewFilter(ctx, clientCfg)
 	if err != nil {
-		return nil, fmt.Errorf("censhaper: create client filter: %w", err)
+		return nil, fmt.Errorf("proxyshaper: create client filter: %w", err)
 	}
 
-	serverCfg := censhaper.Config{
+	serverCfg := hostproxyshaper.Config{
 		Role:          "server",
 		Mode:          mode,
 		DisableTiming: cfg.DisableTiming,
 		GeneratedFlow: generatedFlow,
 	}
-	serverFilter, err := censhaper.NewFilter(ctx, serverCfg)
+	serverFilter, err := hostproxyshaper.NewFilter(ctx, serverCfg)
 	if err != nil {
 		clientFilter.Close(ctx)
-		return nil, fmt.Errorf("censhaper: create server filter: %w", err)
+		return nil, fmt.Errorf("proxyshaper: create server filter: %w", err)
 	}
 
 	return &Manager{

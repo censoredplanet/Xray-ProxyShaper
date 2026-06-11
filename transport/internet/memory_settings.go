@@ -8,25 +8,25 @@ import (
 
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/transport/internet/finalmask"
-	"github.com/xtls/xray-core/transport/internet/censhaper"
+	"github.com/xtls/xray-core/transport/internet/proxyshaper"
 )
 
 // MemoryStreamConfig is a parsed form of StreamConfig. It is used to reduce the number of Protobuf parses.
 type MemoryStreamConfig struct {
-	Destination      *net.Destination
-	ProtocolName     string
-	ProtocolSettings interface{}
-	SecurityType     string
-	SecuritySettings interface{}
-	TcpmaskManager   *finalmask.TcpmaskManager
-	UdpmaskManager   *finalmask.UdpmaskManager
-	censhaperManager  *censhaper.Manager
-	QuicParams       *QuicParams
-	SocketSettings   *SocketConfig
-	DownloadSettings *MemoryStreamConfig
+	Destination        *net.Destination
+	ProtocolName       string
+	ProtocolSettings   interface{}
+	SecurityType       string
+	SecuritySettings   interface{}
+	TcpmaskManager     *finalmask.TcpmaskManager
+	UdpmaskManager     *finalmask.UdpmaskManager
+	ProxyshaperManager *proxyshaper.Manager
+	QuicParams         *QuicParams
+	SocketSettings     *SocketConfig
+	DownloadSettings   *MemoryStreamConfig
 }
 
-//  releases nested stream settings and censhaper state.
+// releases nested stream settings and proxyshaper state.
 func (m *MemoryStreamConfig) Close() error {
 	if m == nil {
 		return nil
@@ -34,8 +34,8 @@ func (m *MemoryStreamConfig) Close() error {
 
 	child := m.DownloadSettings
 	m.DownloadSettings = nil
-	manager := m.censhaperManager
-	m.censhaperManager = nil
+	manager := m.ProxyshaperManager
+	m.ProxyshaperManager = nil
 
 	var errs []error
 	if child != nil {
@@ -45,7 +45,7 @@ func (m *MemoryStreamConfig) Close() error {
 	}
 	if manager != nil {
 		if err := manager.Close(context.Background()); err != nil {
-			errs = append(errs, fmt.Errorf("censhaper manager close: %w", err))
+			errs = append(errs, fmt.Errorf("proxyshaper manager close: %w", err))
 		}
 	}
 	return stderrors.Join(errs...)
@@ -111,16 +111,16 @@ func ToMemoryStreamConfig(s *StreamConfig) (*MemoryStreamConfig, error) {
 		mss.UdpmaskManager = finalmask.NewUdpmaskManager(masks)
 	}
 
-	if s != nil && len(s.censhaperSettingsJSON) > 0 {
-		var cfg censhaper.Config
-		if err := json.Unmarshal(s.censhaperSettingsJSON, &cfg); err != nil {
+	if s != nil && len(s.ProxyshaperSettingsJSON) > 0 {
+		var cfg proxyshaper.Config
+		if err := json.Unmarshal(s.ProxyshaperSettingsJSON, &cfg); err != nil {
 			return nil, err
 		}
-		mgr, err := censhaper.NewManager(context.Background(), &cfg)
+		mgr, err := proxyshaper.NewManager(context.Background(), &cfg)
 		if err != nil {
 			return nil, err
 		}
-		mss.censhaperManager = mgr
+		mss.ProxyshaperManager = mgr
 	}
 
 	return mss, nil

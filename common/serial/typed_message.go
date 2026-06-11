@@ -13,7 +13,7 @@ var typedMessageSidecars sync.Map
 
 var typedMessageSidecarBytesType = reflect.TypeOf([]byte(nil))
 
-//converts a proto Message into TypedMessage.
+// converts a proto Message into TypedMessage.
 func ToTypedMessage(message proto.Message) *TypedMessage {
 	if message == nil {
 		return nil
@@ -23,7 +23,7 @@ func ToTypedMessage(message proto.Message) *TypedMessage {
 		Type:  GetMessageType(message),
 		Value: settings,
 	}
-	// Preserve non-proto censhaper sidecars across TypedMessage round-trips.
+	// Preserve non-proto proxyshaper sidecars across TypedMessage round-trips.
 	if sidecars := collectTypedMessageSidecars(reflect.ValueOf(message), nil); len(sidecars) > 0 {
 		for _, s := range sidecars {
 			if s != nil {
@@ -78,7 +78,7 @@ func collectTypedMessageSidecars(v reflect.Value, sidecars [][]byte) [][]byte {
 		}
 		return collectTypedMessageSidecars(v.Elem(), sidecars)
 	case reflect.Struct:
-		field := v.FieldByName("censhaperSettingsJSON")
+		field := v.FieldByName("ProxyshaperSettingsJSON")
 		if field.IsValid() && field.Type() == typedMessageSidecarBytesType {
 			if field.Len() > 0 {
 				sidecars = append(sidecars, append([]byte(nil), field.Bytes()...))
@@ -115,7 +115,7 @@ func restoreTypedMessageSidecars(v reflect.Value, sidecars [][]byte, index *int)
 		}
 		restoreTypedMessageSidecars(v.Elem(), sidecars, index)
 	case reflect.Struct:
-		field := v.FieldByName("censhaperSettingsJSON")
+		field := v.FieldByName("ProxyshaperSettingsJSON")
 		if field.IsValid() && field.Type() == typedMessageSidecarBytesType && field.CanSet() {
 			if *index < len(sidecars) && sidecars[*index] != nil {
 				field.SetBytes(append([]byte(nil), sidecars[*index]...))

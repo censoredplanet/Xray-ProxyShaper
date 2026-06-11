@@ -1,13 +1,13 @@
-// Censhaper shapes the early packets of a connection according to a
+// proxyshaper shapes the early packets of a connection according to a
 // bootstrap-derived schedule.
 //
 // Architecture during the schedule window:
 //
-//     [proxy] <-- appPair --> [censhaper] <-- [outer conn]
+//     [proxy] <-- appPair --> [proxyshaper] <-- [outer conn]
 //                                                   |
 //                                             [TLS / network]
 //
-// Censhaper derives the bootstrap row from post-handshake TLS exporter
+// proxyshaper derives the bootstrap row from post-handshake TLS exporter
 // material, sleeps until each slot boundary when timing is enabled, frames
 // real proxy bytes into outbound slots, deframes inbound slots, and writes
 // each outbound slot to the outer connection in one Write call. For a
@@ -15,10 +15,10 @@
 // guarantee). TCP segments below TLS are controlled by the kernel and may not
 // be 1:1 with TLS records (MSS fragmentation, middlebox re-segmentation).
 //
-// After the schedule window, Censhaper switches to native io.Copy between the
+// After the schedule window, proxyshaper switches to native io.Copy between the
 // proxy's socket pair and the outer conn.
 
-package censhaper
+package proxyshaper
 
 import (
 	"bytes"
@@ -54,9 +54,9 @@ const (
 	// derive the same uint64 selector from negotiated outer TLS session
 	// secrets, while slot 0 starts with a fixed encrypted marker and then uses
 	// any remaining capacity for normal framed proxy payload.
-	bootstrapPayloadMagic    uint32 = 0x43536870 // "CShp"
+	bootstrapPayloadMagic    uint32 = 0x50536870 // "PShp"
 	bootstrapMarkerSize             = 4
-	bootstrapSeedDeriveLabel        = "censhaper-v1"
+	bootstrapSeedDeriveLabel        = "proxyshaper-v1"
 	bootstrapDerivedSeedSize        = 8
 	bootstrapMinSlotSize            = maxSupportedTLSRecordOverhead + frameHeaderSize + bootstrapMarkerSize
 	bootstrapSlotCount              = 10
@@ -82,7 +82,7 @@ const generatedFlowCommandTimeout = 5 * time.Second
 const generatedFlowMaxOutputBytes = 1 << 20
 
 // Bootstrap configs no longer accept or require a transmitted seed. The
-// censhaper derives the row-selection seed from post-handshake outer TLS channel-
+// proxyshaper derives the row-selection seed from post-handshake outer TLS channel-
 // binding material, so only the derived CSV profiles travel through Config.
 type Config struct {
 	Role           string `json:"role"`
@@ -149,7 +149,7 @@ func (b *limitedOutputBuffer) Truncated() bool {
 }
 
 // Config slot sizes are interpreted as target encrypted TLS record sizes,
-// including the 5-byte TLS record header. Censhaper learns the negotiated TLS
+// including the 5-byte TLS record header. proxyshaper learns the negotiated TLS
 // version/cipher after handshake, subtracts the corresponding record overhead,
 // and executes the remaining plaintext budgets directly.
 //
@@ -326,7 +326,7 @@ func deriveGeneratedProfile(ctx context.Context, cfg GeneratedFlowConfig, seed u
 				// Emit the selected generated row to stderr so failed lab runs
 				// can be correlated with the exact per-connection shape that won the
 				// deterministic seed+retry loop.
-				fmt.Fprintf(os.Stderr, "censhaper generated-flow seed=%d selected=flow_%d row=%s\n", currentSeed, i, row)
+				fmt.Fprintf(os.Stderr, "proxyshaper generated-flow seed=%d selected=flow_%d row=%s\n", currentSeed, i, row)
 				return derivedProfile{
 					Index: i,
 					Name:  fmt.Sprintf("generated_seed_%d_flow_%d", currentSeed, i),
@@ -355,7 +355,7 @@ type Filter struct {
 }
 
 func NewFilter(_ context.Context, cfg Config) (*Filter, error) {
-	// Censhaper now exposes only the TLS-derived bootstrap pipeline.
+	// proxyshaper now exposes only the TLS-derived bootstrap pipeline.
 	// Callers may no longer select legacy dummy/shape entry points.
 	if cfg.Mode == "" {
 		cfg.Mode = "bootstrap"
@@ -404,7 +404,7 @@ func tlsRecordWireOverhead(version, cipherSuite uint16) (uint32, error) {
 
 // tlsConnectionStateValue extracts the concrete TLS/uTLS ConnectionState
 // value from the wrapped outer connection without importing implementation-
-// specific state types into the censhaper package.
+// specific state types into the proxyshaper package.
 func tlsConnectionStateValue(conn net.Conn) (reflect.Value, error) {
 	method := reflect.ValueOf(conn).MethodByName("ConnectionState")
 	if !method.IsValid() {
@@ -448,7 +448,7 @@ func tlsStateFromConn(conn net.Conn) (uint16, uint16, error) {
 // tlsExportKeyingMaterial reflects into the concrete TLS/uTLS
 // ConnectionState so bootstrap mode can derive seed bytes from TLS 1.3
 // exporter material without importing implementation-specific state types into
-// the censhaper package.
+// the proxyshaper package.
 func tlsExportKeyingMaterial(conn net.Conn, label string, context []byte, length int) ([]byte, error) {
 	state, err := tlsConnectionStateValue(conn)
 	if err != nil {
@@ -503,7 +503,7 @@ func ensureHandshake(ctx context.Context, conn net.Conn) error {
 }
 
 // executionConfigForOuter converts target encrypted TLS record sizes into
-// the plaintext budgets that the censhaper must actually execute for this specific
+// the plaintext budgets that the proxyshaper must actually execute for this specific
 // post-handshake connection.
 func executionConfigForOuter(ctx context.Context, cfg Config, outer net.Conn) (Config, error) {
 	overhead := uint32(0)
@@ -544,13 +544,13 @@ func executionConfigForOuter(ctx context.Context, cfg Config, outer net.Conn) (C
 // setup fails, Wrap returns an error and the caller never receives a broken
 // conn. Only the schedule execution and passthrough run asynchronously.
 func (f *Filter) Wrap(ctx context.Context, outer net.Conn) (net.Conn, error) {
-	// App-side pair: proxy reads/writes proxyEnd; censhaper bridges appHostEnd.
+	// App-side pair: proxy reads/writes proxyEnd; proxyshaper bridges appHostEnd.
 	proxyEnd, appHostEnd, err := TCPConnPair()
 	if err != nil {
 		return nil, fmt.Errorf("app pair: %w", err)
 	}
 
-	name := fmt.Sprintf("censhaper-%d", f.counter.Add(1))
+	name := fmt.Sprintf("proxyshaper-%d", f.counter.Add(1))
 	go func() {
 		f.runBootstrapAndPassthrough(ctx, name, outer, appHostEnd)
 	}()
@@ -601,7 +601,7 @@ func (f *Filter) runBootstrapAndPassthrough(
 
 	derived, err := f.runBootstrapPhase(ctx, name, outer, appHostEnd)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "censhaper[%s]: %v\n", name, err)
+		fmt.Fprintf(os.Stderr, "proxyshaper[%s]: %v\n", name, err)
 		return
 	}
 
@@ -613,11 +613,11 @@ func (f *Filter) runBootstrapAndPassthrough(
 	}
 	execCfg, err := executionConfigForOuter(ctx, phaseCfg, outer)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "censhaper[%s]: %v\n", name, err)
+		fmt.Fprintf(os.Stderr, "proxyshaper[%s]: %v\n", name, err)
 		return
 	}
 	if err := f.runSchedulePhase(ctx, execCfg, outer, appHostEnd); err != nil {
-		fmt.Fprintf(os.Stderr, "censhaper[%s]: %v\n", name, err)
+		fmt.Fprintf(os.Stderr, "proxyshaper[%s]: %v\n", name, err)
 		return
 	}
 	f.runPassthrough(outer, appHostEnd)
@@ -636,7 +636,7 @@ func (f *Filter) runBootstrapPhase(
 	_ = name
 
 	// Bootstrap slot 0 is no longer required to have the same size in
-	// every CSV row. Censhaper therefore handles slot 0 natively:
+	// every CSV row. proxyshaper therefore handles slot 0 natively:
 	//   - client and server first derive the same bootstrap seed from the
 	//     negotiated outer TLS session secrets
 	//   - both sides derive the CSV row locally from that seed
@@ -870,7 +870,7 @@ func (f *Filter) runBootstrapMarkerReceiver(ctx context.Context, outer net.Conn,
 	return nil
 }
 
-// executeSchedule runs the derived bootstrap slots directly in censhaper with
+// executeSchedule runs the derived bootstrap slots directly in proxyshaper with
 // slot-relative timing and framed payload handling.
 func (f *Filter) executeSchedule(ctx context.Context, cfg Config, outer net.Conn, appHostEnd *net.TCPConn) error {
 	start := time.Now()

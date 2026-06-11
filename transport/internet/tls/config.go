@@ -511,7 +511,7 @@ func WithNextProto(protocol ...string) Option {
 }
 
 // WithDynamicRecordSizingDisabled disables Go's TLS dynamic record sizing.
-// Required when censhaper is active: dynamic sizing starts with ~1KB records
+// Required when proxyshaper is active: dynamic sizing starts with ~1KB records
 // and grows, splitting large writes into multiple TLS records. This breaks
 // the one-Write-one-record invariant that traffic shaping depends on.
 func WithDynamicRecordSizingDisabled() Option {
