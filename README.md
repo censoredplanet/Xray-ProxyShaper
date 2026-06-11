@@ -2,7 +2,7 @@
 
 Xray-ProxyShaper is an Xray-core fork with ProxyShaper wired into the TCP TLS/uTLS transport path.
 
-It targets VLESS and VMess over TLS. After the outer TLS handshake finishes, but before the proxy protocol handshake starts, ProxyShaper shapes the first 10 encrypted TLS application-data records. The rest of the connection is passed through normally.
+It targets VLESS and VMess over TLS. After the outer TLS handshake finishes, but before the proxy protocol handshake starts, ProxyShaper modifies the packet size and order of the first 10 encrypted TLS application-data records. The rest of the connection is passed through normally.
 
 ## What It Does
 
