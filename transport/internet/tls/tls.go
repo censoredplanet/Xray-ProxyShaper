@@ -170,7 +170,7 @@ func copyConfig(c *tls.Config) *utls.Config {
 		// proxyshaper disables Go's dynamic record sizing so one scheduled
 		// Write maps to one TLS record. The uTLS client path uses a copied config,
 		// so we must propagate the flag here too or fingerprinted clients split
-		// large dummy slots into multiple records.
+		// large padding records into multiple records.
 		DynamicRecordSizingDisabled:    c.DynamicRecordSizingDisabled,
 		Renegotiation:                  utls.RenegotiationSupport(c.Renegotiation),
 		VerifyPeerCertificate:          c.VerifyPeerCertificate,

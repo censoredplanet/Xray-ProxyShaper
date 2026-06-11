@@ -20,11 +20,10 @@ type GeneratedFlowConfig struct {
 }
 
 type Config struct {
-	Mode          string                 `json:"mode"`
-	Slots         []hostproxyshaper.Slot `json:"slots,omitempty"`
-	Seed          *uint64                `json:"seed,omitempty"`
-	DisableTiming bool                   `json:"disableTiming,omitempty"`
-	GeneratedFlow *GeneratedFlowConfig   `json:"generatedFlow,omitempty"`
+	Mode          string               `json:"mode"`
+	Seed          *uint64              `json:"seed,omitempty"`
+	DisableTiming bool                 `json:"disableTiming,omitempty"`
+	GeneratedFlow *GeneratedFlowConfig `json:"generatedFlow,omitempty"`
 }
 
 // Manager holds the bootstrap filter for both roles and creates per-connection

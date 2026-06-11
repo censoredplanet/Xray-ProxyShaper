@@ -1,4 +1,4 @@
-// proxyshaper shapes the early packets of a connection according to a
+// proxyshaper shapes the early TLS records of a connection according to a
 // bootstrap-derived schedule.
 //
 // Architecture during the schedule window:
@@ -8,9 +8,9 @@
 //                                             [TLS / network]
 //
 // proxyshaper derives the bootstrap row from post-handshake TLS exporter
-// material, sleeps until each slot boundary when timing is enabled, frames
-// real proxy bytes into outbound slots, deframes inbound slots, and writes
-// each outbound slot to the outer connection in one Write call. For a
+// material, sleeps until each record boundary when timing is enabled, frames
+// real proxy bytes into outbound records, deframes inbound records, and writes
+// each outbound record to the outer connection in one Write call. For a
 // *tls.Conn outer, one Write produces one TLS record (application-layer
 // guarantee). TCP segments below TLS are controlled by the kernel and may not
 // be 1:1 with TLS records (MSS fragmentation, middlebox re-segmentation).
@@ -40,7 +40,7 @@ import (
 )
 
 // frameHeaderSize is the 2-byte big-endian payload length that precedes
-// real data in each derived bootstrap slot. The remainder is random padding.
+// real data in each derived bootstrap record. The remainder is random padding.
 const frameHeaderSize = 2
 
 const (
@@ -50,21 +50,21 @@ const (
 	tls13AEADWireOverhead             = tlsRecordHeaderSize + 1 + 16
 	maxSupportedTLSRecordOverhead     = tls12GCMWireOverhead
 
-	// Bootstrap slot 0 no longer carries a transmitted seed. Both ends
+	// Bootstrap record 0 no longer carries a transmitted seed. Both ends
 	// derive the same uint64 selector from negotiated outer TLS session
-	// secrets, while slot 0 starts with a fixed encrypted marker and then uses
+	// secrets, while record 0 starts with a fixed encrypted marker and then uses
 	// any remaining capacity for normal framed proxy payload.
 	bootstrapPayloadMagic    uint32 = 0x50536870 // "PShp"
 	bootstrapMarkerSize             = 4
 	bootstrapSeedDeriveLabel        = "proxyshaper-v1"
 	bootstrapDerivedSeedSize        = 8
-	bootstrapMinSlotSize            = maxSupportedTLSRecordOverhead + frameHeaderSize + bootstrapMarkerSize
-	bootstrapSlotCount              = 10
+	bootstrapMinRecordSize          = maxSupportedTLSRecordOverhead + frameHeaderSize + bootstrapMarkerSize
+	bootstrapRecordCount            = 10
 )
 
 // proxyReadTimeout is how long the scheduler waits for proxy data when
-// building a derived bootstrap frame for an "our turn" slot. This balances:
-//   - Too short: proxy hasn't written yet → empty frame (wastes slot capacity)
+// building a derived bootstrap frame for an "our turn" record. This balances:
+//   - Too short: proxy hasn't written yet → empty frame (wastes record capacity)
 //   - Too long: delays the schedule, distorts inter-packet timing
 //
 // 50ms is generous for loopback writes (< 1ms typical) and covers
@@ -85,17 +85,17 @@ const generatedFlowMaxOutputBytes = 1 << 20
 // proxyshaper derives the row-selection seed from post-handshake outer TLS channel-
 // binding material, so only the derived CSV profiles travel through Config.
 type Config struct {
-	Role           string `json:"role"`
-	Mode           string `json:"mode"`
-	Slots          []Slot `json:"slots,omitempty"`
-	RelativeTiming bool   `json:"relative_timing,omitempty"`
-	DisableTiming  bool   `json:"disable_timing,omitempty"`
+	Role           string   `json:"role"`
+	Mode           string   `json:"mode"`
+	Records        []Record `json:"records,omitempty"`
+	RelativeTiming bool     `json:"relative_timing,omitempty"`
+	DisableTiming  bool     `json:"disable_timing,omitempty"`
 	// GeneratedFlow is used only for bootstrap+disableTiming when the
 	// schedule source comes from the external generator.
 	GeneratedFlow *GeneratedFlowConfig `json:"generated_flow,omitempty"`
 }
 
-type Slot struct {
+type Record struct {
 	Size     uint32 `json:"size"`
 	Dir      string `json:"dir"`
 	OffsetMs uint64 `json:"offset_ms"`
@@ -148,7 +148,7 @@ func (b *limitedOutputBuffer) Truncated() bool {
 	return b.truncated
 }
 
-// Config slot sizes are interpreted as target encrypted TLS record sizes,
+// Config record sizes are interpreted as target encrypted TLS record sizes,
 // including the 5-byte TLS record header. proxyshaper learns the negotiated TLS
 // version/cipher after handshake, subtracts the corresponding record overhead,
 // and executes the remaining plaintext budgets directly.
@@ -159,9 +159,9 @@ func (b *limitedOutputBuffer) Truncated() bool {
 //   - bootstrap CSV schedules may also set DisableTiming to execute purely by
 //     packet ordering and size without sleeping
 
-func (c *Config) isOurTurn(s Slot) bool {
-	return (c.Role == "client" && s.Dir == "out") ||
-		(c.Role == "server" && s.Dir == "in")
+func (c *Config) isOurTurn(record Record) bool {
+	return (c.Role == "client" && record.Dir == "out") ||
+		(c.Role == "server" && record.Dir == "in")
 }
 
 func (c *Config) validateBootstrap() error {
@@ -182,8 +182,8 @@ func (c *Config) validateBootstrap() error {
 	if c.GeneratedFlow.NumFlows != 5 {
 		return fmt.Errorf("bootstrap generated_flow num_flows must be 5, got %d", c.GeneratedFlow.NumFlows)
 	}
-	if c.GeneratedFlow.FlowLength != bootstrapSlotCount {
-		return fmt.Errorf("bootstrap generated_flow flow_length must be %d, got %d", bootstrapSlotCount, c.GeneratedFlow.FlowLength)
+	if c.GeneratedFlow.FlowLength != bootstrapRecordCount {
+		return fmt.Errorf("bootstrap generated_flow flow_length must be %d, got %d", bootstrapRecordCount, c.GeneratedFlow.FlowLength)
 	}
 	if c.GeneratedFlow.Generate == nil {
 		if c.GeneratedFlow.GeneratorPath == "" {
@@ -199,11 +199,11 @@ func (c *Config) validateBootstrap() error {
 	return nil
 }
 
-func slotDelayDuration(slot Slot) time.Duration {
-	if slot.OffsetUs > 0 {
-		return time.Duration(slot.OffsetUs) * time.Microsecond
+func recordDelayDuration(record Record) time.Duration {
+	if record.OffsetUs > 0 {
+		return time.Duration(record.OffsetUs) * time.Microsecond
 	}
-	return time.Duration(slot.OffsetMs) * time.Millisecond
+	return time.Duration(record.OffsetMs) * time.Millisecond
 }
 
 // runGeneratedFlowCommand shells out to the generator binary for the
@@ -261,24 +261,24 @@ func runGeneratedFlowCommand(ctx context.Context, cfg GeneratedFlowConfig, seed 
 	return rows, nil
 }
 
-// generatedFlowRowToSlots validates one generated signed-size row
+// generatedFlowRowToRecords validates one generated signed-size row
 // against the minimum bootstrap packet sizes for the negotiated TLS record
 // overhead of this specific connection, rather than the historical worst-case
 // overhead used by the removed fixed-CSV path.
-func generatedFlowRowToSlots(row string, cfg GeneratedFlowConfig, tlsOverhead uint32) ([]Slot, error) {
+func generatedFlowRowToRecords(row string, cfg GeneratedFlowConfig, tlsOverhead uint32) ([]Record, error) {
 	fields := strings.Split(strings.TrimSpace(row), ",")
 	if len(fields) != cfg.FlowLength {
 		return nil, fmt.Errorf("expected %d packet sizes, got %d", cfg.FlowLength, len(fields))
 	}
 
-	slots := make([]Slot, cfg.FlowLength)
+	records := make([]Record, cfg.FlowLength)
 	for i, field := range fields {
 		signedSize, err := strconv.ParseInt(strings.TrimSpace(field), 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("slot %d parse %q: %w", i, field, err)
+			return nil, fmt.Errorf("record %d parse %q: %w", i, field, err)
 		}
 		if signedSize == 0 {
-			return nil, fmt.Errorf("slot %d size must not be 0", i)
+			return nil, fmt.Errorf("record %d size must not be 0", i)
 		}
 
 		dir := "out"
@@ -288,7 +288,7 @@ func generatedFlowRowToSlots(row string, cfg GeneratedFlowConfig, tlsOverhead ui
 			size = -signedSize
 		}
 		if size > int64(^uint32(0)) {
-			return nil, fmt.Errorf("slot %d size %d exceeds uint32", i, size)
+			return nil, fmt.Errorf("record %d size %d exceeds uint32", i, size)
 		}
 
 		minSize := uint32(tlsOverhead + frameHeaderSize)
@@ -296,16 +296,16 @@ func generatedFlowRowToSlots(row string, cfg GeneratedFlowConfig, tlsOverhead ui
 			minSize = tlsOverhead + frameHeaderSize + bootstrapMarkerSize
 		}
 		if uint32(size) < minSize {
-			return nil, fmt.Errorf("slot %d size %d < minimum %d", i, size, minSize)
+			return nil, fmt.Errorf("record %d size %d < minimum %d", i, size, minSize)
 		}
 
-		slots[i] = Slot{
+		records[i] = Record{
 			Size:     uint32(size),
 			Dir:      dir,
 			OffsetUs: 0,
 		}
 	}
-	return slots, nil
+	return records, nil
 }
 
 // deriveGeneratedProfile deterministically retries generator seeds until
@@ -321,16 +321,16 @@ func deriveGeneratedProfile(ctx context.Context, cfg GeneratedFlowConfig, seed u
 			return derivedProfile{}, err
 		}
 		for i, row := range rows {
-			slots, err := generatedFlowRowToSlots(row, cfg, tlsOverhead)
+			records, err := generatedFlowRowToRecords(row, cfg, tlsOverhead)
 			if err == nil {
 				// Emit the selected generated row to stderr so failed lab runs
 				// can be correlated with the exact per-connection shape that won the
 				// deterministic seed+retry loop.
 				fmt.Fprintf(os.Stderr, "proxyshaper generated-flow seed=%d selected=flow_%d row=%s\n", currentSeed, i, row)
 				return derivedProfile{
-					Index: i,
-					Name:  fmt.Sprintf("generated_seed_%d_flow_%d", currentSeed, i),
-					Slots: slots,
+					Index:   i,
+					Name:    fmt.Sprintf("generated_seed_%d_flow_%d", currentSeed, i),
+					Records: records,
 				}, nil
 			}
 		}
@@ -522,16 +522,16 @@ func executionConfigForOuter(ctx context.Context, cfg Config, outer net.Conn) (C
 	}
 
 	execCfg := cfg
-	execCfg.Slots = make([]Slot, len(cfg.Slots))
-	for i, slot := range cfg.Slots {
-		if slot.Size <= overhead {
+	execCfg.Records = make([]Record, len(cfg.Records))
+	for i, record := range cfg.Records {
+		if record.Size <= overhead {
 			return Config{}, fmt.Errorf(
-				"slot %d target size %d too small for negotiated TLS overhead %d",
-				i, slot.Size, overhead,
+				"record %d target size %d too small for negotiated TLS overhead %d",
+				i, record.Size, overhead,
 			)
 		}
-		execCfg.Slots[i] = slot
-		execCfg.Slots[i].Size = slot.Size - overhead
+		execCfg.Records[i] = record
+		execCfg.Records[i].Size = record.Size - overhead
 	}
 	return execCfg, nil
 }
@@ -560,19 +560,19 @@ func (f *Filter) Wrap(ctx context.Context, outer net.Conn) (net.Conn, error) {
 
 // scheduleWindowDeadline returns an absolute deadline that covers the
 // derived bootstrap schedule execution. The current deployment always uses the
-// slot-relative 1..9 path after slot 0, so we sum every slot delay because the
-// anchor resets after each completed slot.
+// record-relative 1..9 path after record 0, so we sum every record delay because the
+// anchor resets after each completed record.
 //
 // The framed mediator can also add up to one proxyReadTimeout of sender-side
-// delay per slot while it waits for proxy bytes. We conservatively budget one
-// proxyReadTimeout per slot plus a 5-second margin for I/O and goroutine
+// delay per record while it waits for proxy bytes. We conservatively budget one
+// proxyReadTimeout per record plus a 5-second margin for I/O and goroutine
 // scheduling jitter.
 func (f *Filter) scheduleWindowDeadline(cfg Config) time.Time {
 	const margin = 5 * time.Second
 	delayBudget := time.Duration(0)
-	extraWait := time.Duration(len(cfg.Slots)) * proxyReadTimeout
-	for _, s := range cfg.Slots {
-		delay := slotDelayDuration(s)
+	extraWait := time.Duration(len(cfg.Records)) * proxyReadTimeout
+	for _, record := range cfg.Records {
+		delay := recordDelayDuration(record)
 		if cfg.RelativeTiming {
 			delayBudget += delay
 		} else if delay > delayBudget {
@@ -585,12 +585,12 @@ func (f *Filter) scheduleWindowDeadline(cfg Config) time.Time {
 	return time.Now().Add(delayBudget + extraWait + margin)
 }
 
-// runBootstrapAndPassthrough executes a fixed one-slot bootstrap phase,
-// derives one of the configured 10-slot CSV rows from negotiated TLS session
-// secrets on both ends, then runs slots 1..9 of that row as a fresh
-// slot-relative derived phase. Both TLS 1.2 and TLS 1.3 use TLS exporters so
+// runBootstrapAndPassthrough executes the bootstrap marker record,
+// derives one of the configured 10-record CSV rows from negotiated TLS session
+// secrets on both ends, then runs records 1..9 of that row as a fresh
+// record-relative derived phase. Both TLS 1.2 and TLS 1.3 use TLS exporters so
 // both endpoints deterministically take the same derivation path. The timing
-// anchor resets after every completed derived slot, which gives the requested
+// anchor resets after every completed derived record, which gives the requested
 // consecutive-send and turnaround timing semantics.
 func (f *Filter) runBootstrapAndPassthrough(
 	ctx context.Context, name string,
@@ -607,7 +607,7 @@ func (f *Filter) runBootstrapAndPassthrough(
 
 	phaseCfg := Config{
 		Role:           f.config.Role,
-		Slots:          derived.Slots[1:],
+		Records:        derived.Records[1:],
 		RelativeTiming: true,
 		DisableTiming:  f.config.DisableTiming,
 	}
@@ -624,9 +624,9 @@ func (f *Filter) runBootstrapAndPassthrough(
 }
 
 type derivedProfile struct {
-	Index int
-	Slots []Slot
-	Name  string
+	Index   int
+	Records []Record
+	Name    string
 }
 
 func (f *Filter) runBootstrapPhase(
@@ -635,13 +635,12 @@ func (f *Filter) runBootstrapPhase(
 ) (derivedProfile, error) {
 	_ = name
 
-	// Bootstrap slot 0 is no longer required to have the same size in
-	// every CSV row. proxyshaper therefore handles slot 0 natively:
+	// Bootstrap record 0 is carried natively:
 	//   - client and server first derive the same bootstrap seed from the
 	//     negotiated outer TLS session secrets
 	//   - both sides derive the CSV row locally from that seed
-	//   - whichever side owns derived slot 0 sends one shaped bootstrap record
-	//     sized for that row's slot 0
+	//   - whichever side owns derived record 0 sends one shaped bootstrap record
+	//     sized for that row's record 0
 	//   - the peer validates the marker prefix and forwards any remaining
 	//     payload bytes before continuing
 	//
@@ -662,10 +661,10 @@ func (f *Filter) runBootstrapPhase(
 	if err != nil {
 		return derivedProfile{}, err
 	}
-	// Slot 0 direction is now driven by the derived row itself rather
+	// Record 0 direction is driven by the derived row itself rather
 	// than by a fixed client-send/server-read split. EKM already gives both
 	// peers the same row, so either side can own the bootstrap marker send.
-	if err := f.runBootstrapSlot0(ctx, outer, appHostEnd, derived); err != nil {
+	if err := f.runBootstrapRecord0(ctx, outer, appHostEnd, derived); err != nil {
 		return derivedProfile{}, err
 	}
 	return derived, nil
@@ -713,7 +712,7 @@ func (f *Filter) runPassthrough(outer net.Conn, appHostEnd *net.TCPConn) {
 	wg.Wait()
 }
 
-// bootstrapPayload prefixes slot-0 proxy bytes with the encrypted
+// bootstrapPayload prefixes record-0 proxy bytes with the encrypted
 // protocol marker. The seed itself stays local to each endpoint and is derived
 // from post-handshake TLS channel-binding material.
 func bootstrapPayload(proxyPayload []byte) []byte {
@@ -724,7 +723,7 @@ func bootstrapPayload(proxyPayload []byte) []byte {
 }
 
 // parseBootstrapPayload validates the encrypted bootstrap marker after
-// the peer has already derived the expected slot-0 size from outer TLS
+// the peer has already derived the expected record-0 size from outer TLS
 // channel-binding material, and returns any proxy payload carried after it.
 func parseBootstrapPayload(payload []byte) ([]byte, error) {
 	if len(payload) < bootstrapMarkerSize {
@@ -736,16 +735,16 @@ func parseBootstrapPayload(payload []byte) ([]byte, error) {
 	return payload[bootstrapMarkerSize:], nil
 }
 
-func (f *Filter) bootstrapExecutionSlot(ctx context.Context, outer net.Conn, slot Slot) (Slot, error) {
+func (f *Filter) bootstrapExecutionRecord(ctx context.Context, outer net.Conn, record Record) (Record, error) {
 	phaseCfg := Config{
-		Role:  f.config.Role,
-		Slots: []Slot{slot},
+		Role:    f.config.Role,
+		Records: []Record{record},
 	}
 	execCfg, err := executionConfigForOuter(ctx, phaseCfg, outer)
 	if err != nil {
-		return Slot{}, err
+		return Record{}, err
 	}
-	return execCfg.Slots[0], nil
+	return execCfg.Records[0], nil
 }
 
 // bootstrapSeedBytesFromTLSState converts negotiated TLS session state
@@ -801,58 +800,58 @@ func (f *Filter) deriveBootstrapProfile(ctx context.Context, outer net.Conn) (de
 	return derived, nil
 }
 
-// runBootstrapSlot0 executes the bootstrap marker exchange for the
-// derived row's slot 0. The sender/receiver are chosen from slot 0 direction
+// runBootstrapRecord0 executes the bootstrap marker exchange for the
+// derived row's record 0. The sender/receiver are chosen from record 0 direction
 // itself, not from a hard-coded client/server split.
-func (f *Filter) runBootstrapSlot0(ctx context.Context, outer net.Conn, appHostEnd *net.TCPConn, derived derivedProfile) error {
-	slot0 := derived.Slots[0]
-	if f.config.isOurTurn(slot0) {
-		return f.runBootstrapMarkerSender(ctx, outer, appHostEnd, slot0)
+func (f *Filter) runBootstrapRecord0(ctx context.Context, outer net.Conn, appHostEnd *net.TCPConn, derived derivedProfile) error {
+	record0 := derived.Records[0]
+	if f.config.isOurTurn(record0) {
+		return f.runBootstrapMarkerSender(ctx, outer, appHostEnd, record0)
 	}
-	return f.runBootstrapMarkerReceiver(ctx, outer, appHostEnd, slot0)
+	return f.runBootstrapMarkerReceiver(ctx, outer, appHostEnd, record0)
 }
 
-// The slot-0 sender writes a bootstrap marker plus any immediately
+// The record-0 sender writes a bootstrap marker plus any immediately
 // available proxy payload once both sides have independently derived the same
 // CSV row from negotiated TLS session secrets.
-func (f *Filter) runBootstrapMarkerSender(ctx context.Context, outer net.Conn, appHostEnd *net.TCPConn, slot Slot) error {
-	execSlot, err := f.bootstrapExecutionSlot(ctx, outer, slot)
+func (f *Filter) runBootstrapMarkerSender(ctx context.Context, outer net.Conn, appHostEnd *net.TCPConn, record Record) error {
+	execRecord, err := f.bootstrapExecutionRecord(ctx, outer, record)
 	if err != nil {
 		return err
 	}
-	maxProxyPayload := int(execSlot.Size) - frameHeaderSize - bootstrapMarkerSize
+	maxProxyPayload := int(execRecord.Size) - frameHeaderSize - bootstrapMarkerSize
 	proxyPayload, err := readAvailable(appHostEnd, maxProxyPayload, proxyReadTimeout)
 	if err != nil {
 		return fmt.Errorf("bootstrap: read proxy data: %w", err)
 	}
-	frame := buildFrame(execSlot.Size, bootstrapPayload(proxyPayload))
+	frame := buildFrame(execRecord.Size, bootstrapPayload(proxyPayload))
 	if err := writeAll(outer, frame); err != nil {
 		return fmt.Errorf("bootstrap: write frame to outer: %w", err)
 	}
 	return nil
 }
 
-// The slot-0 receiver derives the same slot-0 size locally from
+// The record-0 receiver derives the same record-0 size locally from
 // negotiated TLS session secrets, reads exactly that bootstrap record, and
 // validates the encrypted marker before forwarding any carried proxy payload
 // and starting the derived shape schedule.
-func (f *Filter) runBootstrapMarkerReceiver(ctx context.Context, outer net.Conn, appHostEnd *net.TCPConn, slot Slot) error {
-	execSlot, err := f.bootstrapExecutionSlot(ctx, outer, slot)
+func (f *Filter) runBootstrapMarkerReceiver(ctx context.Context, outer net.Conn, appHostEnd *net.TCPConn, record Record) error {
+	execRecord, err := f.bootstrapExecutionRecord(ctx, outer, record)
 	if err != nil {
 		return err
 	}
-	frameBuf := make([]byte, execSlot.Size)
+	frameBuf := make([]byte, execRecord.Size)
 	if _, err := io.ReadFull(outer, frameBuf); err != nil {
 		return fmt.Errorf("bootstrap: read frame from outer: %w", err)
 	}
-	if int(execSlot.Size) < frameHeaderSize {
-		return fmt.Errorf("bootstrap: derived slot %d too small for frame header", execSlot.Size)
+	if int(execRecord.Size) < frameHeaderSize {
+		return fmt.Errorf("bootstrap: derived record %d too small for frame header", execRecord.Size)
 	}
 	payloadLen := uint32(binary.BigEndian.Uint16(frameBuf[:frameHeaderSize]))
-	maxPayload := execSlot.Size - uint32(frameHeaderSize)
+	maxPayload := execRecord.Size - uint32(frameHeaderSize)
 	if payloadLen > maxPayload {
-		return fmt.Errorf("bootstrap: frame payload_length %d exceeds derived capacity %d (slot.Size=%d)",
-			payloadLen, maxPayload, execSlot.Size)
+		return fmt.Errorf("bootstrap: frame payload_length %d exceeds derived capacity %d (record.Size=%d)",
+			payloadLen, maxPayload, execRecord.Size)
 	}
 	if payloadLen < bootstrapMarkerSize {
 		return fmt.Errorf("bootstrap: frame payload_length %d want at least %d", payloadLen, bootstrapMarkerSize)
@@ -870,12 +869,12 @@ func (f *Filter) runBootstrapMarkerReceiver(ctx context.Context, outer net.Conn,
 	return nil
 }
 
-// executeSchedule runs the derived bootstrap slots directly in proxyshaper with
-// slot-relative timing and framed payload handling.
+// executeSchedule runs the derived bootstrap records directly in proxyshaper with
+// record-relative timing and framed payload handling.
 func (f *Filter) executeSchedule(ctx context.Context, cfg Config, outer net.Conn, appHostEnd *net.TCPConn) error {
 	start := time.Now()
 	relativeAnchor := start
-	for i, slot := range cfg.Slots {
+	for i, record := range cfg.Records {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -884,16 +883,16 @@ func (f *Filter) executeSchedule(ctx context.Context, cfg Config, outer net.Conn
 			anchor = relativeAnchor
 		}
 		if !cfg.DisableTiming {
-			if err := sleepUntilContext(ctx, anchor.Add(slotDelayDuration(slot))); err != nil {
+			if err := sleepUntilContext(ctx, anchor.Add(recordDelayDuration(record))); err != nil {
 				return err
 			}
 		}
-		if cfg.isOurTurn(slot) {
-			if err := f.derivedSlotOurTurn(i, slot, outer, appHostEnd); err != nil {
+		if cfg.isOurTurn(record) {
+			if err := f.derivedRecordOurTurn(i, record, outer, appHostEnd); err != nil {
 				return err
 			}
 		} else {
-			if err := f.derivedSlotPeerTurn(i, slot, outer, appHostEnd); err != nil {
+			if err := f.derivedRecordPeerTurn(i, record, outer, appHostEnd); err != nil {
 				return err
 			}
 		}
@@ -904,7 +903,7 @@ func (f *Filter) executeSchedule(ctx context.Context, cfg Config, outer net.Conn
 	return nil
 }
 
-// derivedSlotOurTurn handles one outbound slot in the derived bootstrap phase.
+// derivedRecordOurTurn handles one outbound TLS record in the derived bootstrap phase.
 //
 // Sequence:
 //  1. Read available proxy data from appHostEnd (non-blocking, up to capacity)
@@ -912,77 +911,77 @@ func (f *Filter) executeSchedule(ctx context.Context, cfg Config, outer net.Conn
 //
 // If no proxy data is available (e.g., proxy hasn't written yet), the
 // frame carries payload_length=0 and is entirely random padding. This
-// preserves the on-wire slot size regardless of proxy readiness.
-func (f *Filter) derivedSlotOurTurn(idx int, slot Slot, outer net.Conn, appHostEnd *net.TCPConn) error {
+// preserves the on-wire record size regardless of proxy readiness.
+func (f *Filter) derivedRecordOurTurn(idx int, record Record, outer net.Conn, appHostEnd *net.TCPConn) error {
 	// Step 1: Read whatever proxy data is available, up to the frame's
-	// payload capacity (slot.Size - 4 byte header).
+	// payload capacity (record.Size - frame header).
 	//
-	// Timing note: this wait happens AFTER the scheduled slot delay,
+	// Timing note: this wait happens AFTER the scheduled record delay,
 	// so the outer Write (step 3) occurs up to proxyReadTimeout (50ms) later
-	// than the scheduled slot delay. This is a deliberate trade-off: we accept mild slot
+	// than the scheduled record delay. This is a deliberate trade-off: we accept mild record
 	// timing jitter in exchange for higher utilization. For the primary use
 	// case (VLESS header written before the schedule starts), the data is
 	// already in the buffer and readAvailable returns immediately — zero jitter.
-	maxPayload := int(slot.Size) - frameHeaderSize
+	maxPayload := int(record.Size) - frameHeaderSize
 	payload, err := readAvailable(appHostEnd, maxPayload, proxyReadTimeout)
 	if err != nil {
-		return fmt.Errorf("slot %d: read proxy data: %w", idx, err)
+		return fmt.Errorf("record %d: read proxy data: %w", idx, err)
 	}
 
 	// Step 2: Build the frame.
-	frame := buildFrame(slot.Size, payload)
+	frame := buildFrame(record.Size, payload)
 
 	// Step 3: One Write to outer → one TLS record.
 	if err := writeAll(outer, frame); err != nil {
-		return fmt.Errorf("slot %d: write frame to outer: %w", idx, err)
+		return fmt.Errorf("record %d: write frame to outer: %w", idx, err)
 	}
 	return nil
 }
 
-// derivedSlotPeerTurn handles one inbound slot in the derived bootstrap phase.
+// derivedRecordPeerTurn handles one inbound TLS record in the derived bootstrap phase.
 //
 // Sequence:
-//  1. Read slot.Size bytes from outer (peer's framed data)
+//  1. Read record.Size bytes from outer (peer's framed data)
 //  2. Parse and validate the frame header
 //  3. Deliver real payload to proxy via appHostEnd
-func (f *Filter) derivedSlotPeerTurn(idx int, slot Slot, outer net.Conn, appHostEnd *net.TCPConn) error {
-	// Step 1: Read the full slot from the network.
-	frameBuf := make([]byte, slot.Size)
+func (f *Filter) derivedRecordPeerTurn(idx int, record Record, outer net.Conn, appHostEnd *net.TCPConn) error {
+	// Step 1: Read the full record from the network.
+	frameBuf := make([]byte, record.Size)
 	if _, err := io.ReadFull(outer, frameBuf); err != nil {
-		return fmt.Errorf("slot %d: read frame from outer: %w", idx, err)
+		return fmt.Errorf("record %d: read frame from outer: %w", idx, err)
 	}
 
 	// Step 2: Parse the frame header.
-	if int(slot.Size) < frameHeaderSize {
-		return fmt.Errorf("slot %d: size %d too small for frame header", idx, slot.Size)
+	if int(record.Size) < frameHeaderSize {
+		return fmt.Errorf("record %d: size %d too small for frame header", idx, record.Size)
 	}
 	payloadLen := uint32(binary.BigEndian.Uint16(frameBuf[:frameHeaderSize]))
-	maxPayload := slot.Size - uint32(frameHeaderSize)
+	maxPayload := record.Size - uint32(frameHeaderSize)
 	if payloadLen > maxPayload {
-		return fmt.Errorf("slot %d: frame payload_length %d exceeds capacity %d (slot.Size=%d)",
-			idx, payloadLen, maxPayload, slot.Size)
+		return fmt.Errorf("record %d: frame payload_length %d exceeds capacity %d (record.Size=%d)",
+			idx, payloadLen, maxPayload, record.Size)
 	}
 
 	// Step 3: Deliver real payload to the proxy (skip padding).
 	if payloadLen > 0 {
 		realData := frameBuf[frameHeaderSize : frameHeaderSize+int(payloadLen)]
 		if err := writeAll(appHostEnd, realData); err != nil {
-			return fmt.Errorf("slot %d: write payload to proxy: %w", idx, err)
+			return fmt.Errorf("record %d: write payload to proxy: %w", idx, err)
 		}
 	}
 	return nil
 }
 
-// buildFrame constructs a derived-bootstrap frame of exactly slotSize bytes:
+// buildFrame constructs a derived-bootstrap frame of exactly recordSize bytes:
 //
 //	[2-byte BE payload_length][payload][random padding]
 //
 // If payload is empty, the frame is header + all-random padding.
-func buildFrame(slotSize uint32, payload []byte) []byte {
-	frame := make([]byte, slotSize)
+func buildFrame(recordSize uint32, payload []byte) []byte {
+	frame := make([]byte, recordSize)
 	binary.BigEndian.PutUint16(frame[:frameHeaderSize], uint16(len(payload)))
 	copy(frame[frameHeaderSize:], payload)
-	// Fill remaining bytes with random padding so the slot is
+	// Fill remaining bytes with random padding so the record is
 	// indistinguishable from random data to a passive observer.
 	padStart := frameHeaderSize + len(payload)
 	if padStart < len(frame) {
@@ -994,9 +993,9 @@ func buildFrame(slotSize uint32, payload []byte) []byte {
 // readAvailable waits up to timeout for the first proxy byte, then
 // greedily drains only what is already buffered in the loopback socket.
 // A single Read call may return any positive prefix of what the OS has
-// buffered, so we need follow-up reads to maximize slot utilization. But we
+// buffered, so we need follow-up reads to maximize record utilization. But we
 // must not keep blocking after the buffer is drained, or a small prebuffered
-// VLESS header would consume the full proxyReadTimeout and shift the slot on
+// VLESS header would consume the full proxyReadTimeout and shift the record on
 // the wire.
 //
 // The algorithm is therefore two-phase:

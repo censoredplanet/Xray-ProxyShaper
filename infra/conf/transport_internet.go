@@ -1725,8 +1725,8 @@ type FinalMask struct {
 	QuicParams *QuicParamsConfig `json:"quicParams"`
 }
 
-// proxyshaperSlot exists for legacy config validation.
-type proxyshaperSlot struct {
+// proxyshaperRecord exists for legacy config validation.
+type proxyshaperRecord struct {
 	Size     uint32 `json:"size"`
 	Dir      string `json:"dir"`
 	OffsetMs uint64 `json:"offset_ms"`
@@ -1743,14 +1743,14 @@ type proxyshaperGeneratedFlowConfig struct {
 
 type proxyshaperConfig struct {
 	Mode          string                          `json:"mode"`
-	Slots         []proxyshaperSlot               `json:"slots,omitempty"`
+	LegacyRecords []proxyshaperRecord             `json:"records,omitempty"`
 	Seed          *uint64                         `json:"seed,omitempty"`
 	DisableTiming bool                            `json:"disableTiming,omitempty"`
 	GeneratedFlow *proxyshaperGeneratedFlowConfig `json:"generatedFlow,omitempty"`
 }
 
 const (
-	proxyshaperBootstrapSlotCount = 10
+	proxyshaperBootstrapRecordCount = 10
 )
 
 // Validate rejects unsupported proxyshaper configurations early.
@@ -1771,8 +1771,8 @@ func (c *proxyshaperConfig) Validate(network, security string) error {
 	default:
 		return errors.New(`proxyshaper "mode" must be "bootstrap"`)
 	}
-	if len(c.Slots) > 0 {
-		return errors.New(`proxyshaper bootstrap mode must not set top-level "slots"; use "generatedFlow"`)
+	if len(c.LegacyRecords) > 0 {
+		return errors.New(`proxyshaper bootstrap configuration uses generatedFlow and must not set top-level record sizes`)
 	}
 	if c.Seed != nil {
 		return errors.New(`proxyshaper bootstrap mode must not set "seed"; the row selector is derived from negotiated TLS session secrets`)
@@ -1795,7 +1795,7 @@ func (c *proxyshaperConfig) Validate(network, security string) error {
 	if c.GeneratedFlow.NumFlows != 5 {
 		return errors.New(`proxyshaper generatedFlow "numFlows" must be 5`)
 	}
-	if c.GeneratedFlow.FlowLength != proxyshaperBootstrapSlotCount {
+	if c.GeneratedFlow.FlowLength != proxyshaperBootstrapRecordCount {
 		return errors.New(`proxyshaper generatedFlow "flowLength" must be 10`)
 	}
 	return nil
