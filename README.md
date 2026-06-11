@@ -36,6 +36,7 @@ Add `proxyshaperSettings` under `streamSettings`:
     "network": "tcp",
     "security": "tls",
     "proxyshaperSettings": {
+      "disableTiming": true,
       "generatedFlow": {
         "generatorPath": "/path/to/CensorKLBinary",
         "trafficProfilePath": "/path/to/traffic_profile.bin",
@@ -75,7 +76,7 @@ Records 1-9: [2-byte len][payload][random padding]
 
 ## Build
 
-Requires Go 1.21+.
+Requires Go 1.26+.
 
 Linux / macOS:
 
