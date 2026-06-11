@@ -1727,9 +1727,8 @@ type FinalMask struct {
 
 // proxyshaperRecord exists for legacy config validation.
 type proxyshaperRecord struct {
-	Size     uint32 `json:"size"`
-	Dir      string `json:"dir"`
-	OffsetMs uint64 `json:"offset_ms"`
+	Size uint32 `json:"size"`
+	Dir  string `json:"dir"`
 }
 
 // proxyshaperGeneratedFlowConfig describes generator-backed bootstrap flows.
@@ -1745,7 +1744,6 @@ type proxyshaperConfig struct {
 	Mode          string                          `json:"mode"`
 	LegacyRecords []proxyshaperRecord             `json:"records,omitempty"`
 	Seed          *uint64                         `json:"seed,omitempty"`
-	DisableTiming bool                            `json:"disableTiming,omitempty"`
 	GeneratedFlow *proxyshaperGeneratedFlowConfig `json:"generatedFlow,omitempty"`
 }
 
@@ -1779,9 +1777,6 @@ func (c *proxyshaperConfig) Validate(network, security string) error {
 	}
 	if c.GeneratedFlow == nil {
 		return errors.New(`proxyshaper bootstrap mode requires "generatedFlow"`)
-	}
-	if !c.DisableTiming {
-		return errors.New(`proxyshaper bootstrap mode requires "disableTiming": true when "generatedFlow" is set`)
 	}
 	if c.GeneratedFlow.GeneratorPath == "" {
 		return errors.New(`proxyshaper generatedFlow requires "generatorPath"`)

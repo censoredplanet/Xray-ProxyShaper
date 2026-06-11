@@ -47,7 +47,7 @@ func TCPConnPair() (c1, c2 *net.TCPConn, err error) {
 
 	// Disable Nagle on both ends. Without this, small writes during the
 	// schedule window can be delayed by up to 200ms (Nagle waits for ACK
-	// before sending sub-MSS data), destroying timing accuracy.
+	// before sending sub-MSS data), delaying early shaped records.
 	c1.SetNoDelay(true)
 	c2.SetNoDelay(true)
 

@@ -8,9 +8,8 @@
 //                                             [TLS / network]
 //
 // proxyshaper derives the bootstrap row from post-handshake TLS exporter
-// material, sleeps until each record boundary when timing is enabled, frames
-// real proxy bytes into outbound records, deframes inbound records, and writes
-// each outbound record to the outer connection in one Write call. For a
+// material, frames real proxy bytes into outbound records, deframes inbound
+// records, and writes each outbound record to the outer connection in one Write call. For a
 // *tls.Conn outer, one Write produces one TLS record (application-layer
 // guarantee). TCP segments below TLS are controlled by the kernel and may not
 // be 1:1 with TLS records (MSS fragmentation, middlebox re-segmentation).
@@ -62,10 +61,10 @@ const (
 	bootstrapRecordCount            = 10
 )
 
-// proxyReadTimeout is how long the scheduler waits for proxy data when
+// proxyReadTimeout is how long proxyshaper waits for proxy data when
 // building a derived bootstrap frame for an "our turn" record. This balances:
 //   - Too short: proxy hasn't written yet → empty frame (wastes record capacity)
-//   - Too long: delays the schedule, distorts inter-packet timing
+//   - Too long: delays early passthrough handoff
 //
 // 50ms is generous for loopback writes (< 1ms typical) and covers
 // goroutine scheduling jitter under load.
@@ -85,28 +84,23 @@ const generatedFlowMaxOutputBytes = 1 << 20
 // proxyshaper derives the row-selection seed from post-handshake outer TLS channel-
 // binding material, so only the derived CSV profiles travel through Config.
 type Config struct {
-	Role           string   `json:"role"`
-	Mode           string   `json:"mode"`
-	Records        []Record `json:"records,omitempty"`
-	RelativeTiming bool     `json:"relative_timing,omitempty"`
-	DisableTiming  bool     `json:"disable_timing,omitempty"`
-	// GeneratedFlow is used only for bootstrap+disableTiming when the
-	// schedule source comes from the external generator.
+	Role    string   `json:"role"`
+	Mode    string   `json:"mode"`
+	Records []Record `json:"records,omitempty"`
+	// GeneratedFlow is the only supported bootstrap schedule source.
 	GeneratedFlow *GeneratedFlowConfig `json:"generated_flow,omitempty"`
 }
 
 type Record struct {
-	Size     uint32 `json:"size"`
-	Dir      string `json:"dir"`
-	OffsetMs uint64 `json:"offset_ms"`
-	OffsetUs uint64 `json:"offset_us,omitempty"`
+	Size uint32 `json:"size"`
+	Dir  string `json:"dir"`
 }
 
 // GeneratedFlowConfig carries the external generator inputs for the
-// bootstrap+disableTiming path. The runtime derives the initial seed from
-// outer TLS exporter material, asks the generator for 5 candidate 10-packet
-// flows, keeps the first valid one, and increments the seed deterministically
-// until one passes local bootstrap size checks.
+// bootstrap path. The runtime derives the initial seed from outer TLS exporter
+// material, asks the generator for 5 candidate 10-packet flows, keeps the first
+// valid one, and increments the seed deterministically until one passes local
+// bootstrap size checks.
 type GeneratedFlowConfig struct {
 	GeneratorPath      string                                                               `json:"generator_path,omitempty"`
 	TrafficProfilePath string                                                               `json:"traffic_profile_path,omitempty"`
@@ -148,17 +142,6 @@ func (b *limitedOutputBuffer) Truncated() bool {
 	return b.truncated
 }
 
-// Config record sizes are interpreted as target encrypted TLS record sizes,
-// including the 5-byte TLS record header. proxyshaper learns the negotiated TLS
-// version/cipher after handshake, subtracts the corresponding record overhead,
-// and executes the remaining plaintext budgets directly.
-//
-// Timing representation:
-//   - older sideband payloads may still carry OffsetMs fields, but the active
-//     bootstrap path uses OffsetUs
-//   - bootstrap CSV schedules may also set DisableTiming to execute purely by
-//     packet ordering and size without sleeping
-
 func (c *Config) isOurTurn(record Record) bool {
 	return (c.Role == "client" && record.Dir == "out") ||
 		(c.Role == "server" && record.Dir == "in")
@@ -168,16 +151,11 @@ func (c *Config) validateBootstrap() error {
 	if c.Mode != "" && c.Mode != "bootstrap" {
 		return fmt.Errorf("unsupported mode %q: only bootstrap is implemented", c.Mode)
 	}
-	// Bootstrap now has exactly one maintained source:
-	// generator-backed disable-timing synthesis. Fixed CSV profile selection
-	// has been removed from the supported runtime surface.
+	// Bootstrap now has exactly one maintained source: generator-backed packet
+	// order and size synthesis. Fixed CSV profile selection is not part of the
+	// supported runtime surface.
 	if c.GeneratedFlow == nil {
 		return fmt.Errorf("bootstrap mode requires generated_flow")
-	}
-	// Generated flows are currently defined only for the no-timing
-	// bootstrap path, with a fixed 5x10 candidate matrix per seed.
-	if !c.DisableTiming {
-		return fmt.Errorf("bootstrap generated_flow requires disable_timing")
 	}
 	if c.GeneratedFlow.NumFlows != 5 {
 		return fmt.Errorf("bootstrap generated_flow num_flows must be 5, got %d", c.GeneratedFlow.NumFlows)
@@ -199,17 +177,10 @@ func (c *Config) validateBootstrap() error {
 	return nil
 }
 
-func recordDelayDuration(record Record) time.Duration {
-	if record.OffsetUs > 0 {
-		return time.Duration(record.OffsetUs) * time.Microsecond
-	}
-	return time.Duration(record.OffsetMs) * time.Millisecond
-}
-
-// runGeneratedFlowCommand shells out to the generator binary for the
-// no-timing bootstrap path and returns one signed-size CSV row per candidate
-// flow. Stdout carries the generated rows; stderr is folded into the returned
-// error so runtime failures are diagnosable from logs.
+// runGeneratedFlowCommand shells out to the generator binary and returns one
+// signed-size CSV row per candidate flow. Stdout carries the generated rows;
+// stderr is folded into the returned error so runtime failures are diagnosable
+// from logs.
 func runGeneratedFlowCommand(ctx context.Context, cfg GeneratedFlowConfig, seed uint64) ([]string, error) {
 	if cfg.Generate != nil {
 		return cfg.Generate(ctx, cfg, seed)
@@ -300,9 +271,8 @@ func generatedFlowRowToRecords(row string, cfg GeneratedFlowConfig, tlsOverhead 
 		}
 
 		records[i] = Record{
-			Size:     uint32(size),
-			Dir:      dir,
-			OffsetUs: 0,
+			Size: uint32(size),
+			Dir:  dir,
 		}
 	}
 	return records, nil
@@ -558,40 +528,22 @@ func (f *Filter) Wrap(ctx context.Context, outer net.Conn) (net.Conn, error) {
 	return proxyEnd, nil
 }
 
-// scheduleWindowDeadline returns an absolute deadline that covers the
-// derived bootstrap schedule execution. The current deployment always uses the
-// record-relative 1..9 path after record 0, so we sum every record delay because the
-// anchor resets after each completed record.
-//
-// The framed mediator can also add up to one proxyReadTimeout of sender-side
-// delay per record while it waits for proxy bytes. We conservatively budget one
-// proxyReadTimeout per record plus a 5-second margin for I/O and goroutine
-// scheduling jitter.
+// scheduleWindowDeadline returns an absolute deadline that covers the derived
+// bootstrap execution. The framed mediator can add up to one proxyReadTimeout
+// of sender-side delay per record while it waits for proxy bytes. We
+// conservatively budget one proxyReadTimeout per record plus a 5-second margin
+// for I/O and goroutine scheduling jitter.
 func (f *Filter) scheduleWindowDeadline(cfg Config) time.Time {
 	const margin = 5 * time.Second
-	delayBudget := time.Duration(0)
 	extraWait := time.Duration(len(cfg.Records)) * proxyReadTimeout
-	for _, record := range cfg.Records {
-		delay := recordDelayDuration(record)
-		if cfg.RelativeTiming {
-			delayBudget += delay
-		} else if delay > delayBudget {
-			delayBudget = delay
-		}
-	}
-	if cfg.DisableTiming {
-		delayBudget = 0
-	}
-	return time.Now().Add(delayBudget + extraWait + margin)
+	return time.Now().Add(extraWait + margin)
 }
 
 // runBootstrapAndPassthrough executes the bootstrap marker record,
 // derives one of the configured 10-record CSV rows from negotiated TLS session
-// secrets on both ends, then runs records 1..9 of that row as a fresh
-// record-relative derived phase. Both TLS 1.2 and TLS 1.3 use TLS exporters so
-// both endpoints deterministically take the same derivation path. The timing
-// anchor resets after every completed derived record, which gives the requested
-// consecutive-send and turnaround timing semantics.
+// secrets on both ends, then executes records 1..9 of that row. Both TLS 1.2
+// and TLS 1.3 use TLS exporters so both endpoints deterministically take the
+// same derivation path.
 func (f *Filter) runBootstrapAndPassthrough(
 	ctx context.Context, name string,
 	outer net.Conn, appHostEnd *net.TCPConn,
@@ -606,10 +558,8 @@ func (f *Filter) runBootstrapAndPassthrough(
 	}
 
 	phaseCfg := Config{
-		Role:           f.config.Role,
-		Records:        derived.Records[1:],
-		RelativeTiming: true,
-		DisableTiming:  f.config.DisableTiming,
+		Role:    f.config.Role,
+		Records: derived.Records[1:],
 	}
 	execCfg, err := executionConfigForOuter(ctx, phaseCfg, outer)
 	if err != nil {
@@ -655,8 +605,8 @@ func (f *Filter) runBootstrapPhase(
 	// channel-binding material that never appears on the wire. This removes the
 	// explicit seed exchange while still giving both endpoints the same
 	// per-session row choice.
-	// The per-connection bootstrap source is now always the
-	// generator-backed disable-timing synthesizer.
+	// The per-connection bootstrap source is now always the generator-backed
+	// packet order and size synthesizer.
 	derived, err := f.deriveBootstrapProfile(ctx, outer)
 	if err != nil {
 		return derivedProfile{}, err
@@ -773,8 +723,8 @@ func bootstrapSeedBytesFromTLSState(outer net.Conn) ([]byte, error) {
 }
 
 // deriveBootstrapProfile converts negotiated TLS session secrets into a
-// generator-backed no-timing flow. The same negotiated TLS overhead used later
-// for execution is also used here to decide which candidate rows are valid.
+// generator-backed flow. The same negotiated TLS overhead used later for
+// execution is also used here to decide which candidate rows are valid.
 func (f *Filter) deriveBootstrapProfile(ctx context.Context, outer net.Conn) (derivedProfile, error) {
 	seedBytes, err := bootstrapSeedBytesFromTLSState(outer)
 	if err != nil {
@@ -789,13 +739,13 @@ func (f *Filter) deriveBootstrapProfile(ctx context.Context, outer net.Conn) (de
 	if err != nil {
 		return derivedProfile{}, fmt.Errorf("bootstrap: determine TLS record overhead: %w", err)
 	}
-	// Disable-timing bootstrap synthesizes the 10 signed packet sizes on
-	// demand from the external generator. The TLS-derived seed remains the
-	// synchronization root, while the negotiated overhead narrows the local
-	// candidate filter to what this connection can actually execute.
+	// Bootstrap synthesizes the 10 signed packet sizes on demand from the
+	// external generator. The TLS-derived seed remains the synchronization root,
+	// while the negotiated overhead narrows the local candidate filter to what
+	// this connection can actually execute.
 	derived, err := deriveGeneratedProfile(ctx, *f.config.GeneratedFlow, seed, tlsOverhead)
 	if err != nil {
-		return derivedProfile{}, fmt.Errorf("bootstrap: generate disable-timing flow from seed %d: %w", seed, err)
+		return derivedProfile{}, fmt.Errorf("bootstrap: generate flow from seed %d: %w", seed, err)
 	}
 	return derived, nil
 }
@@ -869,23 +819,12 @@ func (f *Filter) runBootstrapMarkerReceiver(ctx context.Context, outer net.Conn,
 	return nil
 }
 
-// executeSchedule runs the derived bootstrap records directly in proxyshaper with
-// record-relative timing and framed payload handling.
+// executeSchedule runs the derived bootstrap records directly in proxyshaper
+// with framed payload handling.
 func (f *Filter) executeSchedule(ctx context.Context, cfg Config, outer net.Conn, appHostEnd *net.TCPConn) error {
-	start := time.Now()
-	relativeAnchor := start
 	for i, record := range cfg.Records {
 		if err := ctx.Err(); err != nil {
 			return err
-		}
-		anchor := start
-		if cfg.RelativeTiming {
-			anchor = relativeAnchor
-		}
-		if !cfg.DisableTiming {
-			if err := sleepUntilContext(ctx, anchor.Add(recordDelayDuration(record))); err != nil {
-				return err
-			}
 		}
 		if cfg.isOurTurn(record) {
 			if err := f.derivedRecordOurTurn(i, record, outer, appHostEnd); err != nil {
@@ -895,9 +834,6 @@ func (f *Filter) executeSchedule(ctx context.Context, cfg Config, outer net.Conn
 			if err := f.derivedRecordPeerTurn(i, record, outer, appHostEnd); err != nil {
 				return err
 			}
-		}
-		if cfg.RelativeTiming {
-			relativeAnchor = time.Now()
 		}
 	}
 	return nil
@@ -916,12 +852,9 @@ func (f *Filter) derivedRecordOurTurn(idx int, record Record, outer net.Conn, ap
 	// Step 1: Read whatever proxy data is available, up to the frame's
 	// payload capacity (record.Size - frame header).
 	//
-	// Timing note: this wait happens AFTER the scheduled record delay,
-	// so the outer Write (step 3) occurs up to proxyReadTimeout (50ms) later
-	// than the scheduled record delay. This is a deliberate trade-off: we accept mild record
-	// timing jitter in exchange for higher utilization. For the primary use
-	// case (VLESS header written before the schedule starts), the data is
-	// already in the buffer and readAvailable returns immediately — zero jitter.
+	// For the primary use case (VLESS header written before the schedule
+	// starts), the data is already in the buffer and readAvailable returns
+	// immediately.
 	maxPayload := int(record.Size) - frameHeaderSize
 	payload, err := readAvailable(appHostEnd, maxPayload, proxyReadTimeout)
 	if err != nil {
@@ -1080,19 +1013,4 @@ func writeAll(w io.Writer, buf []byte) error {
 		}
 	}
 	return nil
-}
-
-func sleepUntilContext(ctx context.Context, target time.Time) error {
-	delay := time.Until(target)
-	if delay <= 0 {
-		return nil
-	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }

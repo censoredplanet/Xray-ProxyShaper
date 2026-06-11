@@ -22,7 +22,6 @@ type GeneratedFlowConfig struct {
 type Config struct {
 	Mode          string               `json:"mode"`
 	Seed          *uint64              `json:"seed,omitempty"`
-	DisableTiming bool                 `json:"disableTiming,omitempty"`
 	GeneratedFlow *GeneratedFlowConfig `json:"generatedFlow,omitempty"`
 }
 
@@ -63,7 +62,6 @@ func NewManager(ctx context.Context, cfg *Config) (*Manager, error) {
 	clientCfg := hostproxyshaper.Config{
 		Role:          "client",
 		Mode:          mode,
-		DisableTiming: cfg.DisableTiming,
 		GeneratedFlow: generatedFlow,
 	}
 	clientFilter, err := hostproxyshaper.NewFilter(ctx, clientCfg)
@@ -74,7 +72,6 @@ func NewManager(ctx context.Context, cfg *Config) (*Manager, error) {
 	serverCfg := hostproxyshaper.Config{
 		Role:          "server",
 		Mode:          mode,
-		DisableTiming: cfg.DisableTiming,
 		GeneratedFlow: generatedFlow,
 	}
 	serverFilter, err := hostproxyshaper.NewFilter(ctx, serverCfg)

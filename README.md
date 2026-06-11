@@ -36,7 +36,6 @@ Add `proxyshaperSettings` under `streamSettings`:
     "network": "tcp",
     "security": "tls",
     "proxyshaperSettings": {
-      "disableTiming": true,
       "generatedFlow": {
         "generatorPath": "/path/to/CensorKLBinary",
         "trafficProfilePath": "/path/to/traffic_profile.bin",
@@ -50,6 +49,8 @@ Add `proxyshaperSettings` under `streamSettings`:
 ```
 
 The generated row uses final encrypted TLS record sizes, not plaintext payload sizes. ProxyShaper subtracts the negotiated TLS record overhead at runtime before framing proxy bytes.
+
+ProxyShaper currently shapes packet direction and encrypted TLS record size only. Timing-delay shaping is not exposed because the open-source path uses generator-backed flows that are validated and executed by packet order and size.
 
 Minimum generated sizes:
 
