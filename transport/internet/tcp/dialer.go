@@ -43,8 +43,6 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			tlsConfig = config.GetTLSConfig(tls.WithDestination(dest))
 		}
 
-		// proxyshaper requires one TLS record per Write. Go's dynamic record
-		// sizing starts at ~1KB and grows, which fragments large writes.
 		if streamSettings.ProxyshaperManager != nil {
 			tlsConfig.DynamicRecordSizingDisabled = true
 		}

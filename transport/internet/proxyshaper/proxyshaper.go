@@ -10,7 +10,6 @@ import (
 	hostproxyshaper "proxyshaper"
 )
 
-// GeneratedFlowConfig configures generator-backed bootstrap flows.
 type GeneratedFlowConfig struct {
 	GeneratorPath      string `json:"generatorPath,omitempty"`
 	TrafficProfilePath string `json:"trafficProfilePath,omitempty"`
@@ -25,16 +24,12 @@ type Config struct {
 	GeneratedFlow *GeneratedFlowConfig `json:"generatedFlow,omitempty"`
 }
 
-// Manager holds the bootstrap filter for both roles and creates per-connection
-// wrappers via Wrap.
-// Thread-safe.
 type Manager struct {
 	mu           sync.Mutex
 	clientFilter *hostproxyshaper.Filter
 	serverFilter *hostproxyshaper.Filter
 }
 
-// NewManager creates a Manager from config.
 func NewManager(ctx context.Context, cfg *Config) (*Manager, error) {
 	mode := cfg.Mode
 	if mode == "" {
@@ -86,18 +81,14 @@ func NewManager(ctx context.Context, cfg *Config) (*Manager, error) {
 	}, nil
 }
 
-// WrapClient wraps a post-TLS connection for the dialer (client) side.
-// The returned net.Conn is what the proxy protocol reads and writes through.
 func (m *Manager) WrapClient(ctx context.Context, conn net.Conn) (net.Conn, error) {
 	return m.clientFilter.Wrap(ctx, conn)
 }
 
-// WrapServer wraps a post-TLS connection for the listener (server) side.
 func (m *Manager) WrapServer(ctx context.Context, conn net.Conn) (net.Conn, error) {
 	return m.serverFilter.Wrap(ctx, conn)
 }
 
-// Close releases the bootstrap filter resources for both filters.
 func (m *Manager) Close(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

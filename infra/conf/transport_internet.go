@@ -2070,9 +2070,6 @@ func (c *StreamConfig) Build() (*internet.StreamConfig, error) {
 	}
 
 	if c.ProxyshaperSettings != nil {
-		// Validate in Go before serializing the sideband config. This keeps
-		// bad schedules and unsupported transport/security combinations from
-		// reaching runtime, where failures are much harder to diagnose.
 		if err := c.ProxyshaperSettings.Validate(config.ProtocolName, c.Security); err != nil {
 			return nil, errors.New("invalid proxyshaper settings").Base(err)
 		}

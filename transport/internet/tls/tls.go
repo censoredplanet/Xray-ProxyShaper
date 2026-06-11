@@ -163,14 +163,10 @@ func GeneraticUClient(c net.Conn, config *tls.Config) *utls.UConn {
 
 func copyConfig(c *tls.Config) *utls.Config {
 	config := &utls.Config{
-		Rand:               c.Rand,
-		RootCAs:            c.RootCAs,
-		ServerName:         c.ServerName,
-		InsecureSkipVerify: c.InsecureSkipVerify,
-		// proxyshaper disables Go's dynamic record sizing so one scheduled
-		// Write maps to one TLS record. The uTLS client path uses a copied config,
-		// so we must propagate the flag here too or fingerprinted clients split
-		// large padding records into multiple records.
+		Rand:                           c.Rand,
+		RootCAs:                        c.RootCAs,
+		ServerName:                     c.ServerName,
+		InsecureSkipVerify:             c.InsecureSkipVerify,
 		DynamicRecordSizingDisabled:    c.DynamicRecordSizingDisabled,
 		Renegotiation:                  utls.RenegotiationSupport(c.Renegotiation),
 		VerifyPeerCertificate:          c.VerifyPeerCertificate,

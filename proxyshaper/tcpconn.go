@@ -1,12 +1,3 @@
-// Adapted from water/internal/socket/tcpconn.go. Creates a pair of
-// connected *net.TCPConn via a localhost loopback listener. Both ends
-// have real OS file descriptors, which is required for wazero's
-// InsertTCPConn (poll_oneoff needs a kernel-pollable fd).
-//
-// Both ends have Nagle disabled (TCP_NODELAY) so that small writes
-// during the schedule window are pushed immediately rather than
-// buffered for up to 200ms.
-
 package proxyshaper
 
 import (
@@ -45,9 +36,6 @@ func TCPConnPair() (c1, c2 *net.TCPConn, err error) {
 		return nil, nil, fmt.Errorf("accept: %w", acceptErr)
 	}
 
-	// Disable Nagle on both ends. Without this, small writes during the
-	// schedule window can be delayed by up to 200ms (Nagle waits for ACK
-	// before sending sub-MSS data), delaying early shaped records.
 	c1.SetNoDelay(true)
 	c2.SetNoDelay(true)
 

@@ -1,21 +1,5 @@
-// proxyshaper shapes the early TLS records of a connection according to a
-// bootstrap-derived schedule.
-//
-// Architecture during the schedule window:
-//
-//     [proxy] <-- appPair --> [proxyshaper] <-- [outer conn]
-//                                                   |
-//                                             [TLS / network]
-//
-// proxyshaper derives the bootstrap row from post-handshake TLS exporter
-// material, frames real proxy bytes into outbound records, deframes inbound
-// records, and writes each outbound record to the outer connection in one Write call. For a
-// *tls.Conn outer, one Write produces one TLS record (application-layer
-// guarantee). TCP segments below TLS are controlled by the kernel and may not
-// be 1:1 with TLS records (MSS fragmentation, middlebox re-segmentation).
-//
-// After the schedule window, proxyshaper switches to native io.Copy between the
-// proxy's socket pair and the outer conn.
+// proxyshaper shapes the first post-handshake TLS records, then switches to
+// passthrough.
 
 package proxyshaper
 
@@ -38,8 +22,6 @@ import (
 	"time"
 )
 
-// frameHeaderSize is the 2-byte big-endian payload length that precedes
-// real data in each derived bootstrap record. The remainder is random padding.
 const frameHeaderSize = 2
 
 const (
@@ -49,10 +31,6 @@ const (
 	tls13AEADWireOverhead             = tlsRecordHeaderSize + 1 + 16
 	maxSupportedTLSRecordOverhead     = tls12GCMWireOverhead
 
-	// Bootstrap record 0 no longer carries a transmitted seed. Both ends
-	// derive the same uint64 selector from negotiated outer TLS session
-	// secrets, while record 0 starts with a fixed encrypted marker and then uses
-	// any remaining capacity for normal framed proxy payload.
 	bootstrapPayloadMagic    uint32 = 0x50536870 // "PShp"
 	bootstrapMarkerSize             = 4
 	bootstrapSeedDeriveLabel        = "proxyshaper-v1"
@@ -61,33 +39,18 @@ const (
 	bootstrapRecordCount            = 10
 )
 
-// proxyReadTimeout is how long proxyshaper waits for proxy data when
-// building a derived bootstrap frame for an "our turn" record. This balances:
-//   - Too short: proxy hasn't written yet → empty frame (wastes record capacity)
-//   - Too long: delays early passthrough handoff
-//
-// 50ms is generous for loopback writes (< 1ms typical) and covers
-// goroutine scheduling jitter under load.
+// Wait briefly for proxy bytes before sending padding-only records.
 const proxyReadTimeout = 50 * time.Millisecond
 
-// generatedFlowCommandTimeout bounds one external generator invocation. Inbound
-// wraps use context.Background(), so the generator needs its own deadline to
-// keep forked process trees from accumulating indefinitely.
 const generatedFlowCommandTimeout = 5 * time.Second
 
-// generatedFlowMaxOutputBytes is intentionally much larger than a valid
-// 5x10 generated-flow CSV response, while still preventing a misbehaving
-// generator from being buffered into process memory without bound.
 const generatedFlowMaxOutputBytes = 1 << 20
 
-// Bootstrap configs no longer accept or require a transmitted seed. The
-// proxyshaper derives the row-selection seed from post-handshake outer TLS channel-
-// binding material, so only the derived CSV profiles travel through Config.
 type Config struct {
 	Role    string   `json:"role"`
 	Mode    string   `json:"mode"`
 	Records []Record `json:"records,omitempty"`
-	// GeneratedFlow is the only supported bootstrap schedule source.
+
 	GeneratedFlow *GeneratedFlowConfig `json:"generated_flow,omitempty"`
 }
 
@@ -96,11 +59,6 @@ type Record struct {
 	Dir  string `json:"dir"`
 }
 
-// GeneratedFlowConfig carries the external generator inputs for the
-// bootstrap path. The runtime derives the initial seed from outer TLS exporter
-// material, asks the generator for 5 candidate 10-packet flows, keeps the first
-// valid one, and increments the seed deterministically until one passes local
-// bootstrap size checks.
 type GeneratedFlowConfig struct {
 	GeneratorPath      string                                                               `json:"generator_path,omitempty"`
 	TrafficProfilePath string                                                               `json:"traffic_profile_path,omitempty"`
@@ -151,9 +109,6 @@ func (c *Config) validateBootstrap() error {
 	if c.Mode != "" && c.Mode != "bootstrap" {
 		return fmt.Errorf("unsupported mode %q: only bootstrap is implemented", c.Mode)
 	}
-	// Bootstrap now has exactly one maintained source: generator-backed packet
-	// order and size synthesis. Fixed CSV profile selection is not part of the
-	// supported runtime surface.
 	if c.GeneratedFlow == nil {
 		return fmt.Errorf("bootstrap mode requires generated_flow")
 	}
@@ -177,10 +132,7 @@ func (c *Config) validateBootstrap() error {
 	return nil
 }
 
-// runGeneratedFlowCommand shells out to the generator binary and returns one
-// signed-size CSV row per candidate flow. Stdout carries the generated rows;
-// stderr is folded into the returned error so runtime failures are diagnosable
-// from logs.
+// runGeneratedFlowCommand returns one signed-size CSV row per candidate flow.
 func runGeneratedFlowCommand(ctx context.Context, cfg GeneratedFlowConfig, seed uint64) ([]string, error) {
 	if cfg.Generate != nil {
 		return cfg.Generate(ctx, cfg, seed)
@@ -232,10 +184,7 @@ func runGeneratedFlowCommand(ctx context.Context, cfg GeneratedFlowConfig, seed 
 	return rows, nil
 }
 
-// generatedFlowRowToRecords validates one generated signed-size row
-// against the minimum bootstrap packet sizes for the negotiated TLS record
-// overhead of this specific connection, rather than the historical worst-case
-// overhead used by the removed fixed-CSV path.
+// generatedFlowRowToRecords validates one generated signed-size row.
 func generatedFlowRowToRecords(row string, cfg GeneratedFlowConfig, tlsOverhead uint32) ([]Record, error) {
 	fields := strings.Split(strings.TrimSpace(row), ",")
 	if len(fields) != cfg.FlowLength {
@@ -278,11 +227,7 @@ func generatedFlowRowToRecords(row string, cfg GeneratedFlowConfig, tlsOverhead 
 	return records, nil
 }
 
-// deriveGeneratedProfile deterministically retries generator seeds until
-// one of the emitted candidate rows passes bootstrap size validation for the
-// negotiated TLS overhead on this connection. Both peers make the same
-// TLS-derived start-seed choice, inspect rows in the same order, and apply the
-// same seed+1 retry rule.
+// deriveGeneratedProfile uses the same seed+retry rule on both peers.
 func deriveGeneratedProfile(ctx context.Context, cfg GeneratedFlowConfig, seed uint64, tlsOverhead uint32) (derivedProfile, error) {
 	currentSeed := seed
 	for {
@@ -293,9 +238,6 @@ func deriveGeneratedProfile(ctx context.Context, cfg GeneratedFlowConfig, seed u
 		for i, row := range rows {
 			records, err := generatedFlowRowToRecords(row, cfg, tlsOverhead)
 			if err == nil {
-				// Emit the selected generated row to stderr so failed lab runs
-				// can be correlated with the exact per-connection shape that won the
-				// deterministic seed+retry loop.
 				fmt.Fprintf(os.Stderr, "proxyshaper generated-flow seed=%d selected=flow_%d row=%s\n", currentSeed, i, row)
 				return derivedProfile{
 					Index:   i,
@@ -311,22 +253,17 @@ func deriveGeneratedProfile(ctx context.Context, cfg GeneratedFlowConfig, seed u
 	}
 }
 
-// closeWriter is the interface for TCP half-close. *net.TCPConn
-// implements this; *tls.Conn does not (TLS has no half-close).
 type closeWriter interface {
 	CloseWrite() error
 }
 
-// Filter wraps post-TLS connections with the bootstrap-only scheduler.
-// Thread-safe: Wrap can be called concurrently for multiple connections.
+// Filter wraps post-TLS connections.
 type Filter struct {
 	config  Config
 	counter atomic.Uint64
 }
 
 func NewFilter(_ context.Context, cfg Config) (*Filter, error) {
-	// proxyshaper now exposes only the TLS-derived bootstrap pipeline.
-	// Callers may no longer select legacy dummy/shape entry points.
 	if cfg.Mode == "" {
 		cfg.Mode = "bootstrap"
 	}
@@ -372,9 +309,7 @@ func tlsRecordWireOverhead(version, cipherSuite uint16) (uint32, error) {
 	}
 }
 
-// tlsConnectionStateValue extracts the concrete TLS/uTLS ConnectionState
-// value from the wrapped outer connection without importing implementation-
-// specific state types into the proxyshaper package.
+// Reflection keeps this package independent of concrete TLS/uTLS state types.
 func tlsConnectionStateValue(conn net.Conn) (reflect.Value, error) {
 	method := reflect.ValueOf(conn).MethodByName("ConnectionState")
 	if !method.IsValid() {
@@ -415,10 +350,6 @@ func tlsStateFromConn(conn net.Conn) (uint16, uint16, error) {
 	return uint16(versionField.Uint()), uint16(cipherField.Uint()), nil
 }
 
-// tlsExportKeyingMaterial reflects into the concrete TLS/uTLS
-// ConnectionState so bootstrap mode can derive seed bytes from TLS 1.3
-// exporter material without importing implementation-specific state types into
-// the proxyshaper package.
 func tlsExportKeyingMaterial(conn net.Conn, label string, context []byte, length int) ([]byte, error) {
 	state, err := tlsConnectionStateValue(conn)
 	if err != nil {
@@ -472,9 +403,7 @@ func ensureHandshake(ctx context.Context, conn net.Conn) error {
 	return nil
 }
 
-// executionConfigForOuter converts target encrypted TLS record sizes into
-// the plaintext budgets that the proxyshaper must actually execute for this specific
-// post-handshake connection.
+// executionConfigForOuter converts wire-size targets to plaintext budgets.
 func executionConfigForOuter(ctx context.Context, cfg Config, outer net.Conn) (Config, error) {
 	overhead := uint32(0)
 	version, cipherSuite, err := tlsStateFromConn(outer)
@@ -506,15 +435,8 @@ func executionConfigForOuter(ctx context.Context, cfg Config, outer net.Conn) (C
 	return execCfg, nil
 }
 
-// Wrap shapes the configured early schedule of a connection. outer is the real
-// network conn (typically *tls.Conn from Xray's transport layer).
-// Returns a net.Conn for the proxy to use.
-//
-// Bootstrap config validation happens synchronously before Wrap returns. If
-// setup fails, Wrap returns an error and the caller never receives a broken
-// conn. Only the schedule execution and passthrough run asynchronously.
+// Wrap returns the connection used by the proxy protocol.
 func (f *Filter) Wrap(ctx context.Context, outer net.Conn) (net.Conn, error) {
-	// App-side pair: proxy reads/writes proxyEnd; proxyshaper bridges appHostEnd.
 	proxyEnd, appHostEnd, err := TCPConnPair()
 	if err != nil {
 		return nil, fmt.Errorf("app pair: %w", err)
@@ -528,22 +450,14 @@ func (f *Filter) Wrap(ctx context.Context, outer net.Conn) (net.Conn, error) {
 	return proxyEnd, nil
 }
 
-// scheduleWindowDeadline returns an absolute deadline that covers the derived
-// bootstrap execution. The framed mediator can add up to one proxyReadTimeout
-// of sender-side delay per record while it waits for proxy bytes. We
-// conservatively budget one proxyReadTimeout per record plus a 5-second margin
-// for I/O and goroutine scheduling jitter.
+// scheduleWindowDeadline bounds the shaped bootstrap phase.
 func (f *Filter) scheduleWindowDeadline(cfg Config) time.Time {
 	const margin = 5 * time.Second
 	extraWait := time.Duration(len(cfg.Records)) * proxyReadTimeout
 	return time.Now().Add(extraWait + margin)
 }
 
-// runBootstrapAndPassthrough executes the bootstrap marker record,
-// derives one of the configured 10-record CSV rows from negotiated TLS session
-// secrets on both ends, then executes records 1..9 of that row. Both TLS 1.2
-// and TLS 1.3 use TLS exporters so both endpoints deterministically take the
-// same derivation path.
+// runBootstrapAndPassthrough runs record 0, records 1-9, then passthrough.
 func (f *Filter) runBootstrapAndPassthrough(
 	ctx context.Context, name string,
 	outer net.Conn, appHostEnd *net.TCPConn,
@@ -585,15 +499,6 @@ func (f *Filter) runBootstrapPhase(
 ) (derivedProfile, error) {
 	_ = name
 
-	// Bootstrap record 0 is carried natively:
-	//   - client and server first derive the same bootstrap seed from the
-	//     negotiated outer TLS session secrets
-	//   - both sides derive the CSV row locally from that seed
-	//   - whichever side owns derived record 0 sends one shaped bootstrap record
-	//     sized for that row's record 0
-	//   - the peer validates the marker prefix and forwards any remaining
-	//     payload bytes before continuing
-	//
 	if err := ensureHandshake(ctx, outer); err != nil {
 		return derivedProfile{}, fmt.Errorf("bootstrap handshake: %w", err)
 	}
@@ -601,19 +506,10 @@ func (f *Filter) runBootstrapPhase(
 	outer.SetDeadline(deadline)
 	defer outer.SetDeadline(time.Time{})
 
-	// The bootstrap selector is now derived from post-handshake TLS
-	// channel-binding material that never appears on the wire. This removes the
-	// explicit seed exchange while still giving both endpoints the same
-	// per-session row choice.
-	// The per-connection bootstrap source is now always the generator-backed
-	// packet order and size synthesizer.
 	derived, err := f.deriveBootstrapProfile(ctx, outer)
 	if err != nil {
 		return derivedProfile{}, err
 	}
-	// Record 0 direction is driven by the derived row itself rather
-	// than by a fixed client-send/server-read split. EKM already gives both
-	// peers the same row, so either side can own the bootstrap marker send.
 	if err := f.runBootstrapRecord0(ctx, outer, appHostEnd, derived); err != nil {
 		return derivedProfile{}, err
 	}
@@ -632,39 +528,25 @@ func (f *Filter) runSchedulePhase(
 
 func (f *Filter) runPassthrough(outer net.Conn, appHostEnd *net.TCPConn) {
 
-	// Schedule complete. Switch to native passthrough: proxy <-> outer.
-	//
-	// Each goroutine, when its io.Copy returns, propagates shutdown to
-	// the other direction:
-	// - CloseWrite sends FIN to the destination (TCP half-close) so the
-	//   peer sees EOF while the reverse direction can still drain.
-	// - For *tls.Conn (no half-close support), we fall back to full
-	//   Close, which terminates both directions immediately. This is
-	//   correct for TLS (close_notify shuts down the whole session).
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		io.Copy(outer, appHostEnd) // proxy → network
-		// Proxy finished sending. Signal to peer.
+		io.Copy(outer, appHostEnd)
 		if cw, ok := outer.(closeWriter); ok {
 			cw.CloseWrite()
 		} else {
-			outer.Close() // TLS: no half-close
+			outer.Close()
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		io.Copy(appHostEnd, outer) // network → proxy
-		// Peer finished sending. Signal to proxy.
+		io.Copy(appHostEnd, outer)
 		appHostEnd.CloseWrite()
 	}()
 	wg.Wait()
 }
 
-// bootstrapPayload prefixes record-0 proxy bytes with the encrypted
-// protocol marker. The seed itself stays local to each endpoint and is derived
-// from post-handshake TLS channel-binding material.
 func bootstrapPayload(proxyPayload []byte) []byte {
 	buf := make([]byte, bootstrapMarkerSize+len(proxyPayload))
 	binary.BigEndian.PutUint32(buf[0:4], bootstrapPayloadMagic)
@@ -672,9 +554,6 @@ func bootstrapPayload(proxyPayload []byte) []byte {
 	return buf
 }
 
-// parseBootstrapPayload validates the encrypted bootstrap marker after
-// the peer has already derived the expected record-0 size from outer TLS
-// channel-binding material, and returns any proxy payload carried after it.
 func parseBootstrapPayload(payload []byte) ([]byte, error) {
 	if len(payload) < bootstrapMarkerSize {
 		return nil, fmt.Errorf("bootstrap payload size mismatch: got %d want at least %d", len(payload), bootstrapMarkerSize)
@@ -697,10 +576,7 @@ func (f *Filter) bootstrapExecutionRecord(ctx context.Context, outer net.Conn, r
 	return execCfg.Records[0], nil
 }
 
-// bootstrapSeedBytesFromTLSState converts negotiated TLS session state
-// into the shared 8-byte selector seed used for per-connection CSV row
-// selection. Both TLS 1.2 and TLS 1.3 now use the TLS exporter so the
-// deployment only depends on one shared secret primitive.
+// bootstrapSeedBytesFromTLSState derives the shared row-selection seed.
 func bootstrapSeedBytesFromTLSState(outer net.Conn) ([]byte, error) {
 	version, _, err := tlsStateFromConn(outer)
 	if err != nil {
@@ -722,9 +598,7 @@ func bootstrapSeedBytesFromTLSState(outer net.Conn) ([]byte, error) {
 	}
 }
 
-// deriveBootstrapProfile converts negotiated TLS session secrets into a
-// generator-backed flow. The same negotiated TLS overhead used later for
-// execution is also used here to decide which candidate rows are valid.
+// deriveBootstrapProfile selects a generator row for this TLS session.
 func (f *Filter) deriveBootstrapProfile(ctx context.Context, outer net.Conn) (derivedProfile, error) {
 	seedBytes, err := bootstrapSeedBytesFromTLSState(outer)
 	if err != nil {
@@ -739,10 +613,6 @@ func (f *Filter) deriveBootstrapProfile(ctx context.Context, outer net.Conn) (de
 	if err != nil {
 		return derivedProfile{}, fmt.Errorf("bootstrap: determine TLS record overhead: %w", err)
 	}
-	// Bootstrap synthesizes the 10 signed packet sizes on demand from the
-	// external generator. The TLS-derived seed remains the synchronization root,
-	// while the negotiated overhead narrows the local candidate filter to what
-	// this connection can actually execute.
 	derived, err := deriveGeneratedProfile(ctx, *f.config.GeneratedFlow, seed, tlsOverhead)
 	if err != nil {
 		return derivedProfile{}, fmt.Errorf("bootstrap: generate flow from seed %d: %w", seed, err)
@@ -750,9 +620,6 @@ func (f *Filter) deriveBootstrapProfile(ctx context.Context, outer net.Conn) (de
 	return derived, nil
 }
 
-// runBootstrapRecord0 executes the bootstrap marker exchange for the
-// derived row's record 0. The sender/receiver are chosen from record 0 direction
-// itself, not from a hard-coded client/server split.
 func (f *Filter) runBootstrapRecord0(ctx context.Context, outer net.Conn, appHostEnd *net.TCPConn, derived derivedProfile) error {
 	record0 := derived.Records[0]
 	if f.config.isOurTurn(record0) {
@@ -761,9 +628,6 @@ func (f *Filter) runBootstrapRecord0(ctx context.Context, outer net.Conn, appHos
 	return f.runBootstrapMarkerReceiver(ctx, outer, appHostEnd, record0)
 }
 
-// The record-0 sender writes a bootstrap marker plus any immediately
-// available proxy payload once both sides have independently derived the same
-// CSV row from negotiated TLS session secrets.
 func (f *Filter) runBootstrapMarkerSender(ctx context.Context, outer net.Conn, appHostEnd *net.TCPConn, record Record) error {
 	execRecord, err := f.bootstrapExecutionRecord(ctx, outer, record)
 	if err != nil {
@@ -781,10 +645,6 @@ func (f *Filter) runBootstrapMarkerSender(ctx context.Context, outer net.Conn, a
 	return nil
 }
 
-// The record-0 receiver derives the same record-0 size locally from
-// negotiated TLS session secrets, reads exactly that bootstrap record, and
-// validates the encrypted marker before forwarding any carried proxy payload
-// and starting the derived shape schedule.
 func (f *Filter) runBootstrapMarkerReceiver(ctx context.Context, outer net.Conn, appHostEnd *net.TCPConn, record Record) error {
 	execRecord, err := f.bootstrapExecutionRecord(ctx, outer, record)
 	if err != nil {
@@ -819,8 +679,6 @@ func (f *Filter) runBootstrapMarkerReceiver(ctx context.Context, outer net.Conn,
 	return nil
 }
 
-// executeSchedule runs the derived bootstrap records directly in proxyshaper
-// with framed payload handling.
 func (f *Filter) executeSchedule(ctx context.Context, cfg Config, outer net.Conn, appHostEnd *net.TCPConn) error {
 	for i, record := range cfg.Records {
 		if err := ctx.Err(); err != nil {
@@ -839,52 +697,27 @@ func (f *Filter) executeSchedule(ctx context.Context, cfg Config, outer net.Conn
 	return nil
 }
 
-// derivedRecordOurTurn handles one outbound TLS record in the derived bootstrap phase.
-//
-// Sequence:
-//  1. Read available proxy data from appHostEnd (non-blocking, up to capacity)
-//  2. Build frame and write to outer
-//
-// If no proxy data is available (e.g., proxy hasn't written yet), the
-// frame carries payload_length=0 and is entirely random padding. This
-// preserves the on-wire record size regardless of proxy readiness.
 func (f *Filter) derivedRecordOurTurn(idx int, record Record, outer net.Conn, appHostEnd *net.TCPConn) error {
-	// Step 1: Read whatever proxy data is available, up to the frame's
-	// payload capacity (record.Size - frame header).
-	//
-	// For the primary use case (VLESS header written before the schedule
-	// starts), the data is already in the buffer and readAvailable returns
-	// immediately.
 	maxPayload := int(record.Size) - frameHeaderSize
 	payload, err := readAvailable(appHostEnd, maxPayload, proxyReadTimeout)
 	if err != nil {
 		return fmt.Errorf("record %d: read proxy data: %w", idx, err)
 	}
 
-	// Step 2: Build the frame.
 	frame := buildFrame(record.Size, payload)
 
-	// Step 3: One Write to outer → one TLS record.
 	if err := writeAll(outer, frame); err != nil {
 		return fmt.Errorf("record %d: write frame to outer: %w", idx, err)
 	}
 	return nil
 }
 
-// derivedRecordPeerTurn handles one inbound TLS record in the derived bootstrap phase.
-//
-// Sequence:
-//  1. Read record.Size bytes from outer (peer's framed data)
-//  2. Parse and validate the frame header
-//  3. Deliver real payload to proxy via appHostEnd
 func (f *Filter) derivedRecordPeerTurn(idx int, record Record, outer net.Conn, appHostEnd *net.TCPConn) error {
-	// Step 1: Read the full record from the network.
 	frameBuf := make([]byte, record.Size)
 	if _, err := io.ReadFull(outer, frameBuf); err != nil {
 		return fmt.Errorf("record %d: read frame from outer: %w", idx, err)
 	}
 
-	// Step 2: Parse the frame header.
 	if int(record.Size) < frameHeaderSize {
 		return fmt.Errorf("record %d: size %d too small for frame header", idx, record.Size)
 	}
@@ -895,7 +728,6 @@ func (f *Filter) derivedRecordPeerTurn(idx int, record Record, outer net.Conn, a
 			idx, payloadLen, maxPayload, record.Size)
 	}
 
-	// Step 3: Deliver real payload to the proxy (skip padding).
 	if payloadLen > 0 {
 		realData := frameBuf[frameHeaderSize : frameHeaderSize+int(payloadLen)]
 		if err := writeAll(appHostEnd, realData); err != nil {
@@ -905,17 +737,11 @@ func (f *Filter) derivedRecordPeerTurn(idx int, record Record, outer net.Conn, a
 	return nil
 }
 
-// buildFrame constructs a derived-bootstrap frame of exactly recordSize bytes:
-//
-//	[2-byte BE payload_length][payload][random padding]
-//
-// If payload is empty, the frame is header + all-random padding.
+// buildFrame returns: [2-byte payload length][payload][padding].
 func buildFrame(recordSize uint32, payload []byte) []byte {
 	frame := make([]byte, recordSize)
 	binary.BigEndian.PutUint16(frame[:frameHeaderSize], uint16(len(payload)))
 	copy(frame[frameHeaderSize:], payload)
-	// Fill remaining bytes with random padding so the record is
-	// indistinguishable from random data to a passive observer.
 	padStart := frameHeaderSize + len(payload)
 	if padStart < len(frame) {
 		rand.Read(frame[padStart:])
@@ -923,31 +749,13 @@ func buildFrame(recordSize uint32, payload []byte) []byte {
 	return frame
 }
 
-// readAvailable waits up to timeout for the first proxy byte, then
-// greedily drains only what is already buffered in the loopback socket.
-// A single Read call may return any positive prefix of what the OS has
-// buffered, so we need follow-up reads to maximize record utilization. But we
-// must not keep blocking after the buffer is drained, or a small prebuffered
-// VLESS header would consume the full proxyReadTimeout and shift the record on
-// the wire.
-//
-// The algorithm is therefore two-phase:
-//  1. One blocking read with deadline = now + timeout to wait for the first byte.
-//  2. Immediate-deadline reads to drain bytes that are already buffered right now.
-//
-// The timeout remains a wall-clock budget for "wait until the first byte
-// arrives". Once any byte has arrived, additional reads are non-blocking in
-// effect and return immediately when the kernel buffer is empty.
-//
-// Returns 0 bytes without error if the timeout expires with no data at all.
-// Only hard errors (connection reset, peer EOF) are propagated.
+// readAvailable waits for one byte, then drains whatever is already buffered.
 func readAvailable(conn *net.TCPConn, maxBytes int, timeout time.Duration) ([]byte, error) {
 	if maxBytes <= 0 {
 		return nil, nil
 	}
-	// Phase 1: wait up to timeout for the first byte.
 	conn.SetReadDeadline(time.Now().Add(timeout))
-	defer conn.SetReadDeadline(time.Time{}) // clear for future I/O
+	defer conn.SetReadDeadline(time.Time{})
 
 	buf := make([]byte, maxBytes)
 	n, err := conn.Read(buf)
@@ -965,9 +773,6 @@ func readAvailable(conn *net.TCPConn, maxBytes int, timeout time.Duration) ([]by
 		return buf[:total], nil
 	}
 
-	// Phase 2: drain only what is already buffered. An immediate deadline
-	// turns subsequent reads into a non-blocking-ish drain: buffered bytes are
-	// returned right away, and an empty recv buffer surfaces as a timeout.
 	for total < maxBytes {
 		conn.SetReadDeadline(time.Now())
 		n, err = conn.Read(buf[total:])
@@ -988,17 +793,7 @@ func readAvailable(conn *net.TCPConn, maxBytes int, timeout time.Duration) ([]by
 	return buf[:total], nil
 }
 
-// writeAll writes the full buffer to w. Go's io.Writer contract says
-// n < len(p) implies err != nil, so for conforming writers (stdlib TCP,
-// TLS) the loop body executes once. The loop exists as defense against
-// non-conforming wrappers that could silently drop bytes.
-//
-// TLS invariant note: outer is typically a *tls.Conn or *utls.UConn. Both
-// encrypt and flush the entire plaintext in a single Write call — they never
-// return a short write without an error. If the loop somehow did retry on a
-// *tls.Conn, each Write call would produce a separate TLS record, violating
-// the one-Write-one-record invariant that traffic shaping depends on.
-// In practice this path is unreachable for TLS outer conns.
+// writeAll keeps the short-write case explicit.
 func writeAll(w io.Writer, buf []byte) error {
 	for len(buf) > 0 {
 		n, err := w.Write(buf)
