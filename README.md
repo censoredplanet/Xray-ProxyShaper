@@ -4,12 +4,12 @@ Integration of ProxyShaper into [Xray-core](https://github.com/XTLS/Xray-core), 
 
 ## Overview
 
-**Xray-ProxyShaper** extends Xray-core with ProxyShaper's bootstrap traffic shaping mode. For TCP + TLS/uTLS connections, ProxyShaper sits **after** the TLS handshake and **before** the proxy protocol handshake, shaping the first encrypted TLS application-data records to evade traffic analysis.
+**Xray-ProxyShaper** extends Xray-core with ProxyShaper's generated bootstrap traffic shaping. For TCP + TLS/uTLS connections, ProxyShaper sits **after** the TLS handshake and **before** the proxy protocol handshake, shaping the first encrypted TLS application-data records to evade traffic analysis.
 
 ### Supported Protocols
 - **Proxy Protocols**: VLESS, VMess
 - **Transport**: TCP with TLS or uTLS
-- **ProxyShaper Mode**: Bootstrap (TLS-derived)
+- **ProxyShaper**: TLS-derived generated bootstrap flow
 
 ## How It Works
 
@@ -29,10 +29,10 @@ Integration of ProxyShaper into [Xray-core](https://github.com/XTLS/Xray-core), 
 
 ### Generated Flow Configuration
 
-For `bootstrap + disableTiming` mode, traffic patterns are generated externally:
+Traffic patterns are generated externally. This is the only supported ProxyShaper path in this fork.
 
 **Inputs:**
-- `generatorPath` — Path to the obfs generator binary
+- `generatorPath` — Path to the CensorKL binary
 - `trafficProfilePath` — Traffic profile file
 - `modelPath` — Model assumptions JSON
 - `numFlows` — Number of candidate rows to generate (typically 5)
@@ -80,10 +80,8 @@ Configured slot sizes represent **final encrypted TLS record size on the wire**,
     "network": "tcp",
     "security": "tls",
     "proxyshaperSettings": {
-      "mode": "bootstrap",
-      "disableTiming": true,
       "generatedFlow": {
-        "generatorPath": "/path/to/obfs",
+        "generatorPath": "/path/to/CensorKLBinary",
         "trafficProfilePath": "/path/to/traffic_profile.bin",
         "modelPath": "/path/to/model_assumptions.json",
         "numFlows": 5,
